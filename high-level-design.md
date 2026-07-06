@@ -14,7 +14,7 @@ flowchart TB
 
     C --> W
 
-    subgraph WAF
+    subgraph "WAF + CDN"
         CF[Cloudflare]
     end
     W --> CF
@@ -63,7 +63,7 @@ flowchart TB
 |---|---|---|
 | User | Client | Web user |
 | Platform | Web browser | Single responsive web UI |
-| WAF | Cloudflare | DDoS, CDN, DNS |
+| WAF + CDN | Cloudflare | DDoS, CDN, DNS, static asset caching |
 | Load balancer | Nginx | Distributes traffic across 3 app nodes |
 | Application server | Go (Golang) | 3 nodes, stateless |
 | Database | PostgreSQL | Master + Slave (read replica) |

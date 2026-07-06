@@ -17,3 +17,27 @@
  - Put only image path in database. Base url should be in config.
 
 
+
+# 06.07.2026
+### Rview Design
+ - Make it web. Now it is mobile. 
+
+### Home task
+ - LLD of API endpoints.
+ - LLD of cache implementation.
+   * Describe each object that will be cached. 
+   * Describe cache policy of eache cache. When write/read/delete.
+   
+# Example 
+## 1. GET /prfile
+Description: Used to get user's own profile information. 
+Request body: User id is extracted from token.
+Response body 
+{
+    "id": 1, 
+    "username": "ahmad",
+    "post_count": 13,
+    "follower_count": 10,
+    ...
+}
+

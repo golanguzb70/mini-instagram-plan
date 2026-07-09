@@ -3726,34 +3726,6 @@
                                   "fontWeight": "600"
                                 }
                               ]
-                            },
-                            {
-                              "type": "frame",
-                              "id": "kgRUf",
-                              "name": "Message Button",
-                              "width": 330,
-                              "fill": "$--card",
-                              "cornerRadius": "$--radius-m",
-                              "stroke": "$--border",
-                              "strokeWidth": 1,
-                              "padding": [
-                                8,
-                                20
-                              ],
-                              "justifyContent": "center",
-                              "alignItems": "center",
-                              "children": [
-                                {
-                                  "type": "text",
-                                  "id": "no9Hz",
-                                  "name": "Label",
-                                  "fill": "$--foreground",
-                                  "content": "Message",
-                                  "fontFamily": "$--font-secondary",
-                                  "fontSize": 15,
-                                  "fontWeight": "600"
-                                }
-                              ]
                             }
                           ]
                         },

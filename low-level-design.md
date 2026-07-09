@@ -458,7 +458,8 @@ Response data:
                 "user_id": "",
                 "username": "",
                 "full_name": "",
-                "avatar_path": ""
+                "avatar_path": "",
+                "is_following": false
             },
             "post": {
                 "post_id": "",

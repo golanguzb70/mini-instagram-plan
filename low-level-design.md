@@ -705,13 +705,6 @@ Like events are buffered in Redis and flushed to the database by a background wo
 - **When read:** When post details are requested
 - **When deleted:** When the post is deleted or on cache miss
 
-#### 4. Liked state
-
-- **Cache key:** `likes:post:{post_id}`
-- **Data structure:** Redis Set of `user_id` strings
-- **When written:** Like adds the user; unlike removes the user
-- **When read:** To check if the current user has liked the post
-- **When deleted:** When the post is deleted
 
 #### Sync worker
 

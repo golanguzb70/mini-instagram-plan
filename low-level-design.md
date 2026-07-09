@@ -634,7 +634,7 @@ Profile data is cached separately from its counters so that frequent count chang
 #### 1. Profile data
 
 - **Cache key:** `user:{user_id}:profile`
-- **Data structure:** JSON string
+- **Data structure:** Redis Hash
 - **Stored fields:** `user_id`, `username`, `full_name`, `bio`, `avatar_path`
 - **When written:** After reading from DB on cache miss; after profile update
 - **When read:** When viewing a user's profile
@@ -686,7 +686,7 @@ The post show page uses the following four caches.
 #### 1. Post metadata + owner username
 
 - **Cache key:** `post:{post_id}:meta`
-- **Data structure:** JSON string
+- **Data structure:** Redis Hash
 - **Stored fields:** `post_id`, `user_id`, `caption`, `image_path`, `created_at`
 - **Owner username:** read from `user:{user_id}:profile`
 - **When written:** On cache miss; after post update

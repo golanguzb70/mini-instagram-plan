@@ -130,11 +130,14 @@ After this section, each endpoint only describes its request params and the shap
 
 ## 1. POST /sign-up 
 Description: used to create a new account
-Request body: {
+Request body:
+```json
+{
     "email": "",
     "username": "",
     "password": ""
 }
+```
 
 Response data:
 ```json
@@ -145,11 +148,14 @@ Response data:
 
 ## 2. POST /create-profile
 Description: used to create a profile, user_id will extract from the access token
-Request body: {
+Request body:
+```json
+{
     "full_name": "",
     "bio": "",
     "avatar": ""
 }
+```
 
 Response data:
 ```json
@@ -158,10 +164,13 @@ null
 
 ## 3. POST /login
 Description: used to login
-Request body: {
+Request body:
+```json
+{
     "email": "",
     "password": ""
 }
+```
 
 Response data:
 ```json
@@ -172,10 +181,13 @@ Response data:
 
 ## 4. GET /feed
 Description: used to get the user's feed from followed users
-Query params: {
+Query params:
+```json
+{
     "page": 1,
     "per_page": 10
 }
+```
 Response data:
 ```json
 {
@@ -198,9 +210,12 @@ Response data:
 
 ## 5. GET /users/:user_id
 Description: used to view a user's profile
-Path params: {
+Path params:
+```json
+{
     "user_id": ""
 }
+```
 Response data:
 ```json
 {
@@ -225,9 +240,12 @@ Response data:
 
 ## 6. POST /users/:user_id/follow
 Description: used to follow a user
-Path params: {
+Path params:
+```json
+{
     "user_id": ""
 }
+```
 
 Response data:
 ```json
@@ -236,9 +254,12 @@ null
 
 ## 7. DELETE /users/:user_id/follow
 Description: used to unfollow a user
-Path params: {
+Path params:
+```json
+{
     "user_id": ""
 }
+```
 
 Response data:
 ```json
@@ -247,9 +268,12 @@ null
 
 ## 8. POST /post/:post_id/like
 Description: used to like a post
-Path params: {
+Path params:
+```json
+{
     "post_id": ""
 }
+```
 
 Response data:
 ```json
@@ -258,9 +282,12 @@ null
 
 ## 9. DELETE /post/:post_id/like
 Description: used to unlike a post
-Path params: {
+Path params:
+```json
+{
     "post_id": ""
 }
+```
 
 Response data:
 ```json
@@ -269,9 +296,12 @@ null
 
 ## 10. GET /post/:post_id
 Description: used to get a post
-Path params: {
+Path params:
+```json
+{
     "post_id": ""
 }
+```
 
 Response data:
 ```json
@@ -290,13 +320,19 @@ Response data:
 
 ## 11. GET /post/:post_id/comments
 Description: used to get comments for a post
-Path params: {
+Path params:
+```json
+{
     "post_id": ""
 }
-Query params: {
+```
+Query params:
+```json
+{
     "page": 1,
     "per_page": 10
 }
+```
 
 Response data:
 ```json
@@ -316,12 +352,18 @@ Response data:
 
 ## 12. POST /post/:post_id/comments
 Description: used to add a comment to a post
-Path params: {
+Path params:
+```json
+{
     "post_id": ""
 }
-Request body: {
+```
+Request body:
+```json
+{
     "content": ""
 }
+```
 
 Response data:
 ```json
@@ -330,12 +372,18 @@ null
 
 ## 13. PUT /comments/:comment_id
 Description: used to update a comment, only the author of the comment can update it
-Path params: {
+Path params:
+```json
+{
     "comment_id": ""
 }
-Request body: {
+```
+Request body:
+```json
+{
     "content": ""
 }
+```
 
 Response data:
 ```json
@@ -344,9 +392,12 @@ null
 
 ## 14. DELETE /comments/:comment_id
 Description: used to delete a comment, only the author of the comment or author of the post can delete it
-Path params: {
+Path params:
+```json
+{
     "comment_id": ""
 }
+```
 
 Response data:
 ```json
@@ -355,11 +406,14 @@ null
 
 ## 15. GET /users?query=
 Description: used to search for users by name
-Query params: {
+Query params:
+```json
+{
     "query": "",
     "page": 1,
     "per_page": 10
 }
+```
 
 Response data:
 ```json
@@ -378,11 +432,14 @@ Response data:
 
 ## 16. GET /hashtags?query=
 Description: used to search for hashtags
-Query params: {
+Query params:
+```json
+{
     "query": "",
     "page": 1,
     "per_page": 10
 }
+```
 
 Response data:
 ```json
@@ -399,13 +456,19 @@ Response data:
 
 ## 17. GET /hashtags/:name/posts
 Description: used to get posts by hashtag
-Path params: {
+Path params:
+```json
+{
     "name": ""
 }
-Query params: {
+```
+Query params:
+```json
+{
     "page": 1,
     "per_page": 10
 }
+```
 
 Response data:
 ```json
@@ -428,10 +491,13 @@ Response data:
 
 ## 18. POST /post 
 Description: used to create a post
-Request body: {
+Request body:
+```json
+{
     "caption": "",
     "image": ""
 }
+```
 
 Response data:
 ```json
@@ -440,10 +506,13 @@ null
 
 ## 19. GET /notifications
 Description: used to get notifications for the current user, user_id is taken from the token
-Query params: {
+Query params:
+```json
+{
     "page": 1,
     "per_page": 10
 }
+```
 
 Response data:
 ```json
@@ -484,9 +553,12 @@ Response data:
 
 ## 20. POST /notification/:notification_id/read
 Description: used to mark a notification as read
-Path params: {
+Path params:
+```json
+{
     "notification_id": ""
 }
+```
 
 Response data:
 ```json
@@ -495,12 +567,15 @@ null
 
 ## 21. PUT /profile 
 Description: used to update user profile, user_id is taken from the token
-Request body: {
+Request body:
+```json
+{
     "username": "",
     "full_name": "",
     "bio": "",
     "avatar": ""
 }
+```
 
 Response data:
 ```json
@@ -509,10 +584,13 @@ null
 
 ## 22. GET /profile/followers
 Description: used to get followers of the current user, user_id is taken from the token
-Query params: {
+Query params:
+```json
+{
     "page": 1,
     "per_page": 10
 }
+```
 
 Response data:
 ```json
@@ -531,10 +609,13 @@ Response data:
 
 ## 23. GET /profile/following
 Description: used to get following of the current user, user_id is taken from the token
-Query params: {
+Query params:
+```json
+{
     "page": 1,
     "per_page": 10
 }
+```
 
 Response data:
 ```json
@@ -554,9 +635,12 @@ Response data:
 
 ## 24. DELETE /post/:post_id
 Description: used to delete a post, user_id is taken from the token, only the owner of the post can delete it
-Path params: {
+Path params:
+```json
+{
     "post_id": ""
 }
+```
 
 Response data:
 ```json
@@ -565,12 +649,18 @@ null
 
 ## 25. PUT /post/:post_id
 Description: used to update a post, user_id is taken from the token, only the owner of the post can update it
-Path params: {
+Path params:
+```json
+{
     "post_id": ""
 }
-Request body: {
+```
+Request body:
+```json
+{
     "caption": ""
 }
+```
 
 Response data:
 ```json

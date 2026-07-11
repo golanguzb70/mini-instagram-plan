@@ -3,6 +3,7 @@
 All endpoints return responses in the following envelope.
 
 ### Success Response
+
 ```json
 {
     "status": "ok",
@@ -12,6 +13,7 @@ All endpoints return responses in the following envelope.
 ```
 
 ### Error Response
+
 ```json
 {
     "status": "error",
@@ -26,6 +28,7 @@ All endpoints return responses in the following envelope.
 ```
 
 ### Validation Error Example
+
 ```json
 {
     "status": "error",
@@ -44,19 +47,21 @@ All endpoints return responses in the following envelope.
 ```
 
 ### Common HTTP Status Codes
-| Status Code | Meaning |
-|-------------|---------|
-| 200 | OK |
-| 400 | Bad Request |
-| 401 | Unauthorized |
-| 403 | Forbidden |
-| 404 | Not Found |
-| 409 | Conflict |
-| 500 | Internal Server Error |
+
+| Status Code | Meaning               |
+| ----------- | --------------------- |
+| 200         | OK                    |
+| 400         | Bad Request           |
+| 401         | Unauthorized          |
+| 403         | Forbidden             |
+| 404         | Not Found             |
+| 409         | Conflict              |
+| 500         | Internal Server Error |
 
 ### Error Examples by Status Code
 
 #### 400 Bad Request — validation error
+
 ```json
 {
     "status": "error",
@@ -71,6 +76,7 @@ All endpoints return responses in the following envelope.
 ```
 
 #### 401 Unauthorized — missing or invalid token
+
 ```json
 {
     "status": "error",
@@ -85,6 +91,7 @@ All endpoints return responses in the following envelope.
 ```
 
 #### 403 Forbidden — permission denied
+
 ```json
 {
     "status": "error",
@@ -99,6 +106,7 @@ All endpoints return responses in the following envelope.
 ```
 
 #### 404 Not Found — resource not found
+
 ```json
 {
     "status": "error",
@@ -113,6 +121,7 @@ All endpoints return responses in the following envelope.
 ```
 
 #### 500 Internal Server Error
+
 ```json
 {
     "status": "error",
@@ -129,8 +138,10 @@ All endpoints return responses in the following envelope.
 After this section, each endpoint only describes its request params and the shape of `data` inside the success response.
 
 ## 1. POST /sign-up
+
 Description: used to create a new account
 Request body:
+
 ```json
 {
     "email": "",
@@ -143,6 +154,7 @@ Request body:
 ```
 
 Response data:
+
 ```json
 {
     "access_token": ""
@@ -150,8 +162,10 @@ Response data:
 ```
 
 ## 2. POST /login
+
 Description: used to login
 Request body:
+
 ```json
 {
     "email": "",
@@ -160,6 +174,7 @@ Request body:
 ```
 
 Response data:
+
 ```json
 {
     "access_token": ""
@@ -167,16 +182,20 @@ Response data:
 ```
 
 ## 3. POST /logout
+
 Description: used to logout user
 
 Response data:
+
 ```json
 null
 ```
 
 ## 4. GET /users/:user_id
+
 Description: used to view a user's profile
 Path params:
+
 ```json
 {
     "user_id": ""
@@ -184,6 +203,7 @@ Path params:
 ```
 
 Response data:
+
 ```json
 {
     "user_id": "",
@@ -199,15 +219,22 @@ Response data:
 ```
 
 ## 5. GET /users/:user_id/posts
+
 Description: used to get user's posts
-Path params:
+Query params:
+
 ```json
 {
-    "user_id": ""
+    "user_id": "",
+    "page": 0,
+    "per_page": 0
 }
 ```
 
+
+
 Response data:
+
 ```json
 {
     "count": 10,
@@ -215,6 +242,7 @@ Response data:
         {
             "post_id": "",
             "thumbnail_path": "",
+            "caption": "",
             "created_at": ""
         }
     ]
@@ -222,8 +250,10 @@ Response data:
 ```
 
 ## 6. PUT /profile
+
 Description: used to update user profile, user_id is taken from the token
 Request body:
+
 ```json
 {
     "username": "",
@@ -234,13 +264,16 @@ Request body:
 ```
 
 Response data:
+
 ```json
 null
 ```
 
 ## 7. POST /post
+
 Description: used to create a post
 Request body:
+
 ```json
 {
     "caption": "",
@@ -249,13 +282,16 @@ Request body:
 ```
 
 Response data:
+
 ```json
 null
 ```
 
 ## 8. GET /feed
+
 Description: used to get the user's feed from followed users
 Query params:
+
 ```json
 {
     "page": 1,
@@ -264,6 +300,7 @@ Query params:
 ```
 
 Response data:
+
 ```json
 {
     "count": 10,
@@ -283,8 +320,10 @@ Response data:
 ```
 
 ## 9. POST /post/:post_id/like
+
 Description: used to like a post
 Path params:
+
 ```json
 {
     "post_id": ""
@@ -292,13 +331,16 @@ Path params:
 ```
 
 Response data:
+
 ```json
 null
 ```
 
 ## 10. DELETE /post/:post_id/like
+
 Description: used to unlike a post
 Path params:
+
 ```json
 {
     "post_id": ""
@@ -306,13 +348,16 @@ Path params:
 ```
 
 Response data:
+
 ```json
 null
 ```
 
 ## 11. GET /post/:post_id
+
 Description: used to get a post
 Path params:
+
 ```json
 {
     "post_id": ""
@@ -320,6 +365,7 @@ Path params:
 ```
 
 Response data:
+
 ```json
 {
     "post_id": "",
@@ -335,14 +381,18 @@ Response data:
 ```
 
 ## 12. POST /post/:post_id/comments
+
 Description: used to add a comment to a post
 Path params:
+
 ```json
 {
     "post_id": ""
 }
 ```
+
 Request body:
+
 ```json
 {
     "content": ""
@@ -350,13 +400,16 @@ Request body:
 ```
 
 Response data:
+
 ```json
 null
 ```
 
 ## 13. DELETE /comments/:comment_id
+
 Description: used to delete a comment, only the author of the comment or author of the post can delete it
 Path params:
+
 ```json
 {
     "comment_id": ""
@@ -364,19 +417,24 @@ Path params:
 ```
 
 Response data:
+
 ```json
 null
 ```
 
 ## 14. GET /post/:post_id/comments
+
 Description: used to get comments for a post
 Path params:
+
 ```json
 {
     "post_id": ""
 }
 ```
+
 Query params:
+
 ```json
 {
     "page": 1,
@@ -385,6 +443,7 @@ Query params:
 ```
 
 Response data:
+
 ```json
 {
     "count": 10,
@@ -401,8 +460,10 @@ Response data:
 ```
 
 ## 15. DELETE /post/:post_id
+
 Description: used to delete a post, user_id is taken from the token, only the owner of the post can delete it
 Path params:
+
 ```json
 {
     "post_id": ""
@@ -410,13 +471,16 @@ Path params:
 ```
 
 Response data:
+
 ```json
 null
 ```
 
 ## 16. POST /users/:user_id/follow
+
 Description: used to follow a user
 Path params:
+
 ```json
 {
     "user_id": ""
@@ -424,13 +488,16 @@ Path params:
 ```
 
 Response data:
+
 ```json
 null
 ```
 
 ## 17. DELETE /users/:user_id/follow
+
 Description: used to unfollow a user
 Path params:
+
 ```json
 {
     "user_id": ""
@@ -438,13 +505,16 @@ Path params:
 ```
 
 Response data:
+
 ```json
 null
 ```
 
 ## 18. GET /notifications
+
 Description: used to get notifications for the current user, user_id is taken from the token
 Query params:
+
 ```json
 {
     "page": 1,
@@ -453,6 +523,7 @@ Query params:
 ```
 
 Response data:
+
 ```json
 {
     "count": 10,
@@ -489,8 +560,10 @@ Response data:
 ```
 
 ## 19. POST /notification/:notification_id/read
+
 Description: used to mark a notification as read
 Path params:
+
 ```json
 {
     "notification_id": ""
@@ -498,13 +571,16 @@ Path params:
 ```
 
 Response data:
+
 ```json
 null
 ```
 
 ## 20. GET /users?query=
+
 Description: used to search for users by name
 Query params:
+
 ```json
 {
     "query": "",
@@ -514,6 +590,7 @@ Query params:
 ```
 
 Response data:
+
 ```json
 {
     "count": 10,
@@ -529,8 +606,10 @@ Response data:
 ```
 
 ## 21. GET /hashtags?query=
+
 Description: used to search for hashtags
 Query params:
+
 ```json
 {
     "query": "",
@@ -540,6 +619,7 @@ Query params:
 ```
 
 Response data:
+
 ```json
 {
     "count": 10,
@@ -553,14 +633,18 @@ Response data:
 ```
 
 ## 22. GET /hashtags/:name/posts
+
 Description: used to get posts by hashtag
 Path params:
+
 ```json
 {
     "name": ""
 }
 ```
+
 Query params:
+
 ```json
 {
     "page": 1,
@@ -569,6 +653,7 @@ Query params:
 ```
 
 Response data:
+
 ```json
 {
     "count": 10,
@@ -588,8 +673,10 @@ Response data:
 ```
 
 ## 23. GET /profile/followers
+
 Description: used to get followers of the current user, user_id is taken from the token
 Query params:
+
 ```json
 {
     "page": 1,
@@ -598,6 +685,7 @@ Query params:
 ```
 
 Response data:
+
 ```json
 {
     "count": 10,
@@ -613,8 +701,10 @@ Response data:
 ```
 
 ## 24. GET /profile/following
+
 Description: used to get following of the current user, user_id is taken from the token
 Query params:
+
 ```json
 {
     "page": 1,
@@ -623,6 +713,7 @@ Query params:
 ```
 
 Response data:
+
 ```json
 {
     "count": 10,
@@ -638,14 +729,18 @@ Response data:
 ```
 
 ## 25. PUT /post/:post_id
+
 Description: used to update a post, user_id is taken from the token, only the owner of the post can update it
 Path params:
+
 ```json
 {
     "post_id": ""
 }
 ```
+
 Request body:
+
 ```json
 {
     "caption": ""
@@ -653,19 +748,24 @@ Request body:
 ```
 
 Response data:
+
 ```json
 null
 ```
 
 ## 26. PUT /comments/:comment_id
+
 Description: used to update a comment, only the author of the comment can update it
 Path params:
+
 ```json
 {
     "comment_id": ""
 }
 ```
+
 Request body:
+
 ```json
 {
     "content": ""
@@ -673,6 +773,7 @@ Request body:
 ```
 
 Response data:
+
 ```json
 null
 ```
@@ -706,7 +807,6 @@ Like events are buffered in Redis and flushed to the database by a background wo
 - **When written:** Like or unlike event updates the counter
 - **When read:** When post details are requested
 - **When deleted:** When the post is deleted or on cache miss
-
 
 #### Sync worker
 
@@ -761,8 +861,6 @@ Profile data is cached separately from its counters so that frequent count chang
 #### Cache miss handling
 
 Each part is fetched independently. If any cache key is missing, only that part is read from the database and written back to the cache. The final response is assembled from cache and database data.
-
-
 
 ### Post Show Cache
 

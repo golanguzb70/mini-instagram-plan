@@ -221,16 +221,13 @@ SELECT COUNT(id) FROM posts WHERE user_id = $1 AND deleted_at IS NULL;
 ### Step 5 — Fetch followers count
 
 ```sql
-SELECT COUNT(id) FROM follows WHERE following_id = $1;
+SELECT 
+    COUNT(id) filter (where following_id = $1) as followers_count,
+    count(id) filter (where follower_id = $1) as following_count
+FROM follows;
 ```
 
-### Step 6 — Fetch following count
-
-```sql
-SELECT COUNT(id) FROM follows WHERE follower_id = $1;
-```
-
-### Step 7 — Check is_following
+### Step 6 — Check is_following
 
 If the requesting user's `user_id` (from JWT) equals the profile's `user_id` → set `is_following` = `null` (viewing own profile).
 Otherwise query the DB:
@@ -241,7 +238,7 @@ SELECT id FROM follows WHERE follower_id = $1 AND following_id = $2 LIMIT 1;
 
 If a row is found → `is_following = true`, otherwise `is_following = false`.
 
-### Step 8 — Return response
+### Step 7 — Return response
 
 ```json
 {
@@ -332,13 +329,17 @@ Extract `user_id` from the token claims.
 
 ### Step 2 — Parse request body
 
+Request uses `Content-Type: multipart/form-data` because it may include an image file.
+Parse text fields using `r.FormValue()` and the avatar file using `r.FormFile()`.
+
 ```go
-type UpdateProfileRequest struct {
-    Username string `json:"username"`
-    FullName string `json:"full_name"`
-    Bio      string `json:"bio"`
-    Avatar   string `json:"avatar"`
-}
+r.ParseMultipartForm(5 << 20) // 5 MB limit
+
+username := r.FormValue("username")
+fullName := r.FormValue("full_name")
+bio      := r.FormValue("bio")
+
+file, header, err := r.FormFile("avatar") // optional
 ```
 
 ### Step 3 — Validation
@@ -353,7 +354,7 @@ If none of the fields are provided → return `400 Bad Request` (`at least one f
 
 ### Step 4 — Check username uniqueness
 
-If `username` changed, query the DB:
+If `username` is provided, first check if it differs from the current value. If changed, query the DB:
 
 ```sql
 SELECT id FROM users WHERE username = $1 AND id != $2 LIMIT 1;
@@ -361,18 +362,27 @@ SELECT id FROM users WHERE username = $1 AND id != $2 LIMIT 1;
 
 If a row is found → return `409 Conflict` (`username already exists`).
 
-### Step 5 — Upload avatar (optional)
+### Step 5 — Validate and upload avatar (optional)
 
-If `avatar` is provided, upload to storage and get back `avatar_path`.
+If `avatar` file is provided:
+
+- Validate file size is not larger than **5 MB**. If it is → return `400 Bad Request` (`avatar must be at most 5 MB`).
+- Validate file type is an image (e.g., `image/jpeg`, `image/png`, `image/webp`). If invalid → return `400 Bad Request` (`invalid image format`).
+- Upload to storage and get back `avatar_path`.
+
 If not provided, keep the existing `avatar_path`.
 
-### Step 6 — Update user in DB
+### Step 6 — Build dynamic UPDATE query
+
+Only include fields that were provided in the request.
 
 ```sql
 UPDATE users
 SET username = $1, full_name = $2, bio = $3, avatar_path = $4, updated_at = now()
 WHERE id = $5;
 ```
+
+If a field was not provided, keep its current value in the database.
 
 ### Step 7 — Return response
 
@@ -394,11 +404,15 @@ Extract `user_id` from the token claims.
 
 ### Step 2 — Parse request body
 
+Request uses `Content-Type: multipart/form-data` because it includes an image file.
+Parse text fields using `r.FormValue()` and the image file using `r.FormFile()`.
+
 ```go
-type CreatePostRequest struct {
-    Caption string `json:"caption"`
-    Image   string `json:"image"`
-}
+r.ParseMultipartForm(10 << 20) // 10 MB limit
+
+caption := r.FormValue("caption")
+
+file, header, err := r.FormFile("image") // required
 ```
 
 ### Step 3 — Validation
@@ -406,13 +420,14 @@ type CreatePostRequest struct {
 - `image` is required
 - `caption` is optional
 
-
 If validation fails → return `400 Bad Request`.
 
-### Step 4 — Upload image to storage
+### Step 4 — Validate and upload image
 
-Upload the image file to storage and get back `image_path`.
-Generate a thumbnail and get back `thumbnail_path`.
+- Validate file size is not larger than **10 MB**. If it is → return `400 Bad Request` (`image must be at most 10 MB`).
+- Validate file type is an image (e.g., `image/jpeg`, `image/png``). If invalid → return `400 Bad Request` (`invalid image format`).
+- Upload the image to storage and get back `image_path`.
+- Generate a thumbnail and get back `thumbnail_path`.
 
 ### Step 5 — Insert post into DB
 

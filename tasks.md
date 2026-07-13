@@ -1372,3 +1372,164 @@ UPDATE comments SET content = $1, updated_at = now() WHERE id = $2;
     "data": null
 }
 ```
+
+# 28. Like/Unlike Cache Implementation
+
+## Goal
+
+Buffer like and unlike events in cache before writing them to the database. A cron job runs every 1 minute to flush cached events to the DB.
+
+## Cache structure
+
+There are two separate cache responsibilities:
+
+1. **User like state cache** — stores per-user like/unlike state until it is flushed to the DB.
+2. **Like counter cache** — fast read path for current like count, with a timestamp used by the flush worker.
+
+### 1. User like state cache
+
+- **Key:** `like:{user_id}:{post_id}`
+- **Type:** Redis String (integer)
+- **Value:** `1` = user has liked the post; `0` = user has unliked the post
+- **When written:** On every like or unlike event.
+- **When read:** Sync worker reads it before flushing to the database; read path checks `is_liked`.
+- **When deleted:** After successful database flush, or when a pending action is cancelled.
+
+### 2. Like counter cache
+
+- **Key:** `like-count:{post_id}`
+- **Type:** Redis Hash
+- **Fields:**
+  - `count` (integer) — current like count.
+  - `updated_at` (integer) — last unix timestamp (seconds) when the count changed.
+- **When updated:** On every like or unlike event.
+- **When read:** When returning post details or feed.
+- **When deleted:** When the post is deleted or on cache miss.
+
+## Handling like
+
+When a user likes a post:
+
+1. If `like:{user_id}:{post_id}` exists and equals `0`:
+   - Delete the key (cancel the pending unlike).
+2. Otherwise:
+   - Set `like:{user_id}:{post_id}` to `1`.
+3. Increment `like-count:{post_id}` `count` by 1.
+4. Update `like-count:{post_id}` `updated_at` to the current unix timestamp.
+
+```go
+// Pseudocode
+if redis.Get(likeKey(userID, postID)) == "0" {
+    redis.Del(likeKey(userID, postID))
+} else {
+    redis.Set(likeKey(userID, postID), "1")
+}
+redis.HIncrBy(likeCountKey(postID), "count", 1)
+redis.HSet(likeCountKey(postID), "updated_at", nowUnix())
+```
+
+## Handling unlike
+
+When a user unlikes a post:
+
+1. If `like:{user_id}:{post_id}` exists and equals `1`:
+   - Delete the key (cancel the pending like).
+2. Otherwise:
+   - Set `like:{user_id}:{post_id}` to `0`.
+3. Decrement `like-count:{post_id}` `count` by 1, but not below 0.
+4. Update `like-count:{post_id}` `updated_at` to the current unix timestamp.
+
+```go
+// Pseudocode
+if redis.Get(likeKey(userID, postID)) == "1" {
+    redis.Del(likeKey(userID, postID))
+} else {
+    redis.Set(likeKey(userID, postID), "0")
+}
+current := redis.HGet(likeCountKey(postID), "count")
+if current > 0 {
+    redis.HIncrBy(likeCountKey(postID), "count", -1)
+}
+redis.HSet(likeCountKey(postID), "updated_at", nowUnix())
+```
+
+## Cron job — flush cache to DB every 1 minute
+
+The worker keeps the timestamp of the last successful flush (`lastFlushAt`). On each run it processes only the records that changed since then. On the first run, `lastFlushAt` is `0`, so all cached counters are flushed.
+
+### 1. Flush user like states
+
+Scan all keys matching `like:*:*`.
+
+For each key:
+
+- Parse `user_id` and `post_id` from the key.
+- Read the value.
+- If value is `1`:
+  ```sql
+  INSERT INTO likes (user_id, post_id) VALUES ($1, $2)
+  ON CONFLICT DO NOTHING;
+  ```
+- If value is `0`:
+  ```sql
+  DELETE FROM likes WHERE user_id = $1 AND post_id = $2;
+  ```
+- Delete the processed key.
+
+### 2. Flush like counts
+
+1. Scan all keys matching `like-count:*`.
+2. For each key, read `count` and `updated_at`.
+3. If `updated_at > lastFlushAt`:
+   - Update the post row:
+     ```sql
+     UPDATE posts SET likes_count = $1, updated_at = now() WHERE id = $2;
+     ```
+4. Remember the current time as `lastFlushAt` for the next run.
+
+```go
+// Pseudocode
+now := time.Now().Unix()
+for _, key := range redis.Scan("like-count:*") {
+    postID := parsePostID(key)
+    count := redis.HGet(key, "count")
+    updatedAt := redis.HGet(key, "updated_at")
+    if updatedAt > lastFlushAt {
+        db.Exec("UPDATE posts SET likes_count = ?, updated_at = now() WHERE id = ?", count, postID)
+    }
+}
+lastFlushAt = now
+```
+
+## Read path
+
+### Like count
+
+When returning a single post, a feed, or any post list (hashtag, profile, etc.), the like count must always be served from cache.
+
+For each `post_id`:
+
+1. Read `count` field from `like-count:{post_id}`.
+2. If cache miss:
+   - Compute the count from DB:
+     ```sql
+     SELECT COUNT(*) FROM likes WHERE post_id = $1;
+     ```
+   - Write the result to cache:
+     ```go
+     redis.HSet(likeCountKey(postID), "count", dbCount)
+     redis.HSet(likeCountKey(postID), "updated_at", 0)
+     ```
+3. Return the value that is now in cache.
+
+### is_liked
+
+1. Read `like:{user_id}:{post_id}` from cache.
+   - If value is `1` → `is_liked = true`.
+   - If value is `0` → `is_liked = false`.
+2. If cache miss, query the DB:
+   ```sql
+   SELECT id FROM likes WHERE user_id = $1 AND post_id = $2 LIMIT 1;
+   ```
+   - If row exists → `is_liked = true`.
+   - Otherwise → `is_liked = false`.

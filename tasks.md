@@ -1,1535 +1,456 @@
-# 1. Creating all tables in the database
+# Mini Instagram — Implementation Tasks
 
-# 2. POST /sign-up
+---
 
-### Step 1 — Parse request body
+## 0. Project Context (read first)
 
-Request uses `Content-Type: multipart/form-data` because it may include an image file.
-Parse text fields using `r.FormValue()` and the avatar file using `r.FormFile()`.
+### 0.1 Architecture
 
-```go
-r.ParseMultipartForm(10 << 20) // 10 MB limit
+Clean architecture (controller → usecase → repo), Go 1.25.
 
-email    := r.FormValue("email")
-fullName := r.FormValue("full_name")
-username := r.FormValue("username")
-bio      := r.FormValue("bio")
-password := r.FormValue("password")
-
-file, header, err := r.FormFile("avatar") // optional
+```
+mini-instagram/
+├── cmd/app/main.go                     # entrypoint: load config, call app.Run
+├── config/config.go                    # env-based config (caarlos0/env + godotenv)
+├── migrations/                         # SQL migrations (golang-migrate format, up/down)
+├── internal/
+│   ├── app/app.go                      # wiring: postgres, repos, usecases, router, http server
+│   ├── entity/                         # domain structs (user.go, errors.go, ...) — one file per entity
+│   ├── controller/restapi/
+│   │   ├── router.go                   # root router, /healthz, mounts /api/v1
+│   │   └── v1/
+│   │       ├── router.go               # V1 struct + route registration (NewRoutes)
+│   │       ├── auth.go                 # handlers grouped by domain (auth.go, user.go, post.go, ...)
+│   │       └── http/                   # response envelope + status helpers
+│   ├── usecase/
+│   │   ├── contracts.go                # usecase interfaces + Input structs with Validate()
+│   │   └── auth/auth.go                # implementations, one package per usecase group
+│   └── repo/
+│       ├── contracts.go                # repo interfaces
+│       └── persistent/user/user.go     # pgx implementations, one package per aggregate
+└── pkg/                                # reusable, project-agnostic packages
+    ├── httpserver/                     # gin server wrapper with options
+    ├── postgres/                       # pgxpool wrapper with options
+    ├── logger/                         # slog-based logger
+    ├── jwt/                            # JWT create/parse helpers
+    ├── image/                          # image decode/resize/thumbnail helpers
+    ├── storage/                        # local-disk file storage (save/delete)
+    └── redis/                          # (to create) go-redis client wrapper with options
 ```
 
-### Step 2 — Validation
+**Layer rules:**
 
-- `email` is required
-- `full_name` is required
-- `username` is required
-- `password` is required
-- `bio` is optional
-- `avatar` is optional
-- `password` must be at least 8 characters
+- Handlers (`controller/restapi/v1`) parse/bind requests, call usecases, map errors to HTTP statuses via `handleResponse`. No business logic.
+- Usecases contain business logic + input validation (`Validate()` on Input structs using `go-playground/validator`).
+- Repos contain only SQL (pgx). No business logic.
+- New usecase interfaces go into `internal/usecase/contracts.go`; new repo interfaces into `internal/repo/contracts.go`.
+- Wire everything in `internal/app/app.go` and pass to `restapi.NewRouter`.
 
-If validation fails → return `400 Bad Request`.
+### 0.2 Packages (already in go.mod — do not add others unless a task says so)
 
-### Step 3 — Check email uniqueness
+| Package | Purpose |
+|---|---|
+| `github.com/gin-gonic/gin` | HTTP framework |
+| `github.com/go-playground/validator/v10` | input validation |
+| `github.com/jackc/pgx/v5` (pgxpool) | PostgreSQL driver |
+| `github.com/golang-jwt/jwt/v5` | JWT tokens |
+| `golang.org/x/crypto` (bcrypt) | password hashing |
+| `github.com/caarlos0/env/v11`, `github.com/joho/godotenv` | config |
+| `github.com/redis/go-redis/v9` | Redis — rate limiting + cache (add to go.mod in T3) |
 
-Query the DB:
+Allowed additions (only when a task requires): `golang.org/x/image/draw` or `github.com/disintegration/imaging` (thumbnails) — prefer stdlib `image` first.
 
-```sql
-SELECT id FROM users WHERE email = $1 LIMIT 1;
+### 0.3 API conventions
+
+- Base path: `/api/v1` (already mounted). All routes below are relative to it.
+- Response envelope (already implemented in `internal/controller/restapi/v1/http`):
+
+```json
+// success
+{ "status": "ok", "description": "...", "data": { } }
+// error
+{ "status": "error", "description": "...", "errors": [ { "field": "email", "message": "..." } ] }
 ```
 
-If a row is found → return `409 Conflict` (`email already exists`).
+- HTTP codes: 200 OK, 400 validation, 401 unauthorized, 403 forbidden, 404 not found, 409 conflict, 429 too many requests, 500 internal.
+- Pagination: query params `page` (default 1, min 1) and `per_page` (default 10, min 1, max 100). Offset = `(page-1)*per_page`. List responses: `{ "count": <total rows>, "items": [...] }` where `count` is the TOTAL matching rows (separate `COUNT(*)` query), not page size.
+- Timestamps: RFC3339 UTC strings in JSON.
 
-### Step 4 — Check username uniqueness
+### 0.4 Global decisions (pre-answered questions — follow, do not ask)
 
-Query the DB:
+- **Auth**: single JWT access token (HS256), TTL 24h, secret from env `JWT_SECRET` (add to config + `.env.example`). Claims: `user_id`, `exp`, `iat`. No refresh tokens for MVP.
+- **Auth middleware**: gin middleware in `internal/controller/restapi/v1` that reads `Authorization: Bearer <token>`, validates via `pkg/jwt`, puts `user_id` (int64) into gin context. Missing/invalid → 401 envelope error. Applied per-route-group, not globally (`/sign-up`, `/login`, `GET /users/:user_id`, `GET /post/:post_id`, comments list are public; everything else requires auth). Public endpoints that return `is_following` / `is_liked` return `false` when unauthenticated (middleware variant that parses token if present but does not reject).
+- **IDs**: bigint ids everywhere — NO UUIDs anywhere in this project. Users are addressed by numeric `user_id` (`users.id`), posts by numeric `post_id` (`posts.id`), comments and notifications by their bigint ids. Every `:post_id` / `:user_id` / `:comment_id` path param is a bigint; non-numeric value → 400. Follow endpoints use `user_id` (not username, overriding the sheet).
+- **Image upload**: `multipart/form-data` for all image endpoints (NOT base64 JSON). File field name: `image` for posts, `avatar` for profile.
+- **Storage**: local disk via `pkg/storage`. Root dir from env `STORAGE_DIR` (default `./storage`). Layout: `storage/avatars/<name>.<ext>`, `storage/posts/<name>.<ext>`, `storage/thumbnails/<name>.jpg`, where `<name>` is a random unique filename generated in Go (e.g. 16 random bytes hex-encoded via `crypto/rand` — NOT a UUID). DB stores relative paths (e.g. `posts/ab12….jpg`). Serve files via gin static route `GET /media/*` → `STORAGE_DIR` (register in `restapi/router.go`, outside `/api/v1`). No S3 for MVP.
+- **Allowed image types**: jpeg, png, webp — detect by content sniffing (`http.DetectContentType`), not extension. Reject others with 400.
+- **Redis**: used for rate limiting AND data cache. Create `pkg/redis` (go-redis v9 client wrapper, ping on startup), env `REDIS_URL` (add to config + `.env.example`, e.g. `redis://localhost:6379/0`). Wire in `internal/app/app.go`. **Fail-open policy**: if Redis is unavailable, log the error and continue — rate limiting allows the request, caching falls through to the DB. Redis errors must NEVER fail a user request.
+- **Rate limiting**: Redis-backed, keyed by email. Keys `rl:signup:<email>` / `rl:login:<email>`; algorithm: `INCR` + `EXPIRE 60s` on first hit; count > 5 → **429**. Implement as reusable gin middleware in `internal/controller/restapi/v1/middleware.go`. Limit: 5 requests per minute per email for `/sign-up` and `/login`.
+- **Caching**: cache-aside pattern via Redis, JSON-serialized values. Cache only caller-independent data (never cache `is_liked` / `is_following` — compute those per-request from the DB). Keys/TTLs and invalidation are specified in T22; implement caching ONLY in T22 (after all endpoints work against the DB), not while building T7/T11/T14.
+- **Passwords**: bcrypt, cost `bcrypt.DefaultCost`. Never log or return passwords.
+- **Soft delete**: posts and comments use `deleted_at` (columns already exist). All read queries must filter `deleted_at IS NULL`. Physical files ARE deleted from storage on post delete.
+- **Denormalized counters**: `posts.like_count` and `posts.comment_count` are updated in the same transaction as the like/comment insert/delete (`UPDATE posts SET like_count = like_count + 1 ...`). Read endpoints use these columns, never `COUNT(*)` over likes/comments.
+- **Errors**: sentinel errors in `internal/entity/errors.go` (`ErrNotFound` exists; add `ErrEmailTaken`, `ErrUsernameTaken`, `ErrInvalidCredentials`, `ErrForbidden`, `ErrAlreadyLiked`, `ErrNotLiked`, `ErrAlreadyFollowing`, `ErrNotFollowing`, `ErrSelfFollow` as needed). Usecases return these; handlers map them to HTTP codes with `errors.Is`.
+- **Migrations**: schema already exists in `migrations/20260716000001_create_instagram_tables.up.sql` (users, posts, likes, follows, comments, notifications, hashtags, post_hashtags). Do NOT recreate tables. If a task needs a schema change, add a NEW timestamped up/down migration pair.
+- **Testing**: unit tests for usecases with hand-written repo fakes (implement repo interfaces in `_test.go` files). No testcontainers/mocks libraries. Handlers verified via `httptest` where cheap. Run `go build ./... && go vet ./... && go test ./...` after every task.
+- **Logging**: use `pkg/logger`. Log errors at handler boundary; do not `panic`.
 
-```sql
-SELECT id FROM users WHERE username = $1 LIMIT 1;
+---
+
+## Epic 1 — Auth & Accounts
+
+### T1. Sign up with email/password
+
+`POST /api/v1/auth/sign-up` — partially implemented (`v1/auth.go`, `usecase/auth`, `repo/persistent/user`). Audit the existing code against this spec and complete what is missing.
+
+**Request (JSON):**
+
+```json
+{ "email": "", "full_name": "", "username": "", "bio": "", "password": "" }
 ```
 
-If a row is found → return `409 Conflict` (`username already exists`).
+Avatar is NOT part of sign-up (upload later via `PUT /profile`).
 
-### Step 5 — Upload avatar (optional)
+**Response `data`:** `{ "access_token": "" }` — user is logged in immediately after sign-up.
 
-If `avatar` file is provided, upload it to storage and get back `avatar_path`.
-If not provided, set `avatar_path` = `""`.
+**Behavior:**
+1. Validate input (see T2).
+2. Check email and username uniqueness (see T2).
+3. Hash password with bcrypt, insert user, generate JWT, return token.
 
-### Step 6 — Hash password
+**Acceptance:** valid sign-up returns 200 with a parseable JWT containing `user_id`; the user row exists with a bcrypt hash.
 
-```go
-hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-```
+### T2. Validations and uniqueness check (sign-up)
 
-### Step 7 — Insert user into DB
+Extends T1 — same endpoint.
 
-`user_id` is generated automatically by DB since the column is `BIGSERIAL`.
-`is_active` is set to `true` by default.
+**Validation rules (in `SignUpInput.Validate()`):**
+- `email`: required, valid email, max 128
+- `password`: required, min 8, max 72 (bcrypt limit)
+- `username`: required, 3–32 chars, regex `^[a-z0-9_.]+$` (lowercase; lowercase the input before validating)
+- `full_name`: required, max 64
+- `bio`: optional, max 512
 
-```sql
-INSERT INTO users (email, full_name, username, bio, avatar_path, password, is_active)
-VALUES ($1, $2, $3, $4, $5, $6, true)
-RETURNING id, username, email, full_name, is_active;
-```
+**Uniqueness:** check email and username before insert; on conflict return **409** with field-level error (`{"field":"email","message":"email is already taken"}`). Also handle the pg unique-violation race (pgx error code `23505`) and map it to the same 409 — the pre-check alone is not enough.
 
-### Step 8 — Generate JWT access token
+**Validation error mapping:** convert `validator.ValidationErrors` into the envelope `errors` array with lowercased field names (a small helper in the handler layer or `v1/http` package). All validated endpoints reuse this helper.
 
-JWT payload:
+**Acceptance:** each invalid field produces a 400 with the correct `field` entry; duplicate email/username → 409.
+
+### T3. Rate limiting by email (sign-up)
+
+First set up Redis: add `github.com/redis/go-redis/v9`, create `pkg/redis`, add `REDIS_URL` to config/`.env.example`, wire in `app.go` (see 0.4).
+
+Then apply the Redis-backed rate-limit middleware (see 0.4) to `POST /auth/sign-up`, keyed by the `email` field in the body (peek body via `c.ShouldBindBodyWith` or read+restore body; fallback key = client IP when email is empty/unparseable).
+
+- Limit: 5/min per email (`INCR` + `EXPIRE`). Exceeded → **429**, description "Too Many Requests", error message "too many attempts, try again later".
+- Redis down → fail-open (allow the request, log the error).
+
+**Acceptance:** 6th sign-up attempt with the same email within a minute → 429; different emails are independent.
+
+### T4. Log in with email/password
+
+`POST /api/v1/auth/login`
+
+**Request:** `{ "email": "", "password": "" }`
+**Response `data`:** `{ "access_token": "" }`
+
+**Behavior:**
+- Add `Login` to auth usecase (interface method already declared in `usecase/contracts.go`): fetch user by email, `bcrypt.CompareHashAndPassword`, issue JWT.
+- Wrong email OR wrong password → identical **401** response with message "invalid email or password" (never reveal which one is wrong; map both `entity.ErrNotFound` from repo and bcrypt mismatch to `entity.ErrInvalidCredentials`).
+- `is_active = false` users → same 401.
+
+**Acceptance:** correct credentials → token; wrong password and unknown email produce byte-identical error bodies.
+
+### T5. Rate limiting by email (login)
+
+Reuse T3 middleware on `POST /auth/login`, same limits (5/min per email). Separate key prefixes per endpoint (`rl:login:` vs `rl:signup:` — sign-up attempts must not consume login quota).
+
+**Acceptance:** 6th login attempt for the same email in a minute → 429.
+
+### T6. Log out
+
+`POST /api/v1/auth/logout` — requires auth middleware.
+
+**Decision:** stateless JWT, no server-side blacklist. The endpoint only verifies the token and returns success (`data: null`, description "Logged out"); the client discards the token. Do NOT build token storage/blacklist.
+
+**Acceptance:** with valid token → 200; without token → 401.
+
+### T7. Profile page — view profile
+
+Two endpoints:
+
+1. `GET /api/v1/profile` — **auth required**, returns the caller's own profile (`user_id` from token).
+2. `GET /api/v1/users/:user_id` — public (optional-auth middleware), any user's profile.
+
+**Response `data` (both):**
 
 ```json
 {
-    "user_id": 1,
-    "username": "",
-    "email": "",
-    "full_name": "",
-    "is_active": true
+  "user_id": 0, "username": "", "full_name": "", "bio": "", "avatar_path": "",
+  "posts_count": 0, "followers_count": 0, "following_count": 0, "is_following": false
 }
 ```
 
-```go
-token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-accessToken, err := token.SignedString([]byte(secretKey))
-```
+- Counts via `COUNT(*)` subqueries in one SQL statement (posts filtered by `deleted_at IS NULL`).
+- `is_following`: whether the CALLER follows this user; `false` for own profile or unauthenticated callers.
+- Unknown/inactive `user_id` → 404. Non-numeric `user_id` → 400.
 
-### Step 9 — Return response
+Also implement here (belongs to profile page):
+
+`GET /api/v1/users/:user_id/posts` — public, paginated (0.3), user's posts newest-first, excluding soft-deleted.
+
+**Response `data`:** `{ "count": 0, "items": [ { "post_id": 0, "thumbnail_path": "", "caption": "", "created_at": "" } ] }`
+
+Create `internal/usecase/user` (interface `User` in contracts) and extend the user repo; handler file `v1/user.go`. Note: post listing needs the post repo — if T9 is not done yet, define the `repo.Post` interface + minimal `ListByUser` now and extend it in T9 (returning empty list until posts exist is acceptable).
+
+**Acceptance:** counts are correct after follows/posts exist; `is_following` reflects the caller; 404 for missing users.
+
+### T8. Edit profile
+
+`PUT /api/v1/profile` — auth required. **Multipart form-data** (because of avatar):
+
+- fields: `username`, `full_name`, `bio` (strings), `avatar` (optional file).
+- All text fields required-on-update semantics: the client sends the full desired state for `username`, `full_name`, `bio` (same validation rules as T2). Email and password are NOT changeable here.
+- `avatar`: **max 5 MB** (enforce via `http.MaxBytesReader` / size check before decode), jpeg/png/webp only, saved to `storage/avatars/<random-hex>.<ext>`. Old avatar file is deleted from storage after a successful update (ignore file-not-found errors, log others).
+- Username uniqueness: changing to a taken username → 409 (skip check if unchanged).
+
+**Response `data`:** `null`, description "Profile updated".
+
+**Acceptance:** text-only update works without `avatar` part; >5MB avatar → 400 with field `avatar`; taken username → 409; old avatar file removed from disk.
+
+---
+
+## Epic 2 — Core MVP: Posts & Feed
+
+### T9. Create post
+
+`POST /api/v1/post` — auth required. **Multipart form-data**: `image` (file, required), `caption` (string, optional, max 2048).
+
+**Behavior:**
+1. Enforce **max 10 MB** image size (reject before reading the whole body where possible), allowed types per 0.4.
+2. Save original to `storage/posts/<random-hex>.<ext>` (filename per 0.4); insert row into `posts` with `INSERT ... RETURNING id`.
+3. If DB insert fails after the file was written, delete the file (best-effort cleanup).
+
+**Response `data`:** `null` (per LLD), description "Post created". (Returning the post id inside `data` is NOT required — keep `null`.)
+
+Create `internal/usecase/post`, `internal/repo/persistent/post`, handler `v1/post.go`. Add `Post` interfaces to both contracts files.
+
+**Acceptance:** authorized multipart upload creates a row + file on disk; 11 MB file → 400; missing image part → 400 field `image`; no auth → 401.
+
+### T10. Thumbnail generation
+
+Extends T9 — same endpoint, same transaction of work.
+
+- After saving the original, generate a thumbnail using `pkg/image`: max side **320px**, preserve aspect ratio, encode as JPEG quality ~80 regardless of source format.
+- Save to `storage/thumbnails/<random-hex>.jpg`, store relative path in `posts.thumbnail_path`.
+- **Decision:** generate synchronously in the request (no queue/goroutine — MVP). If thumbnail generation fails, fail the whole request and clean up saved files.
+
+**Acceptance:** created post has a non-empty `thumbnail_path` and the file exists; thumbnail's largest dimension ≤ 320.
+
+### T11. Home feed
+
+`GET /api/v1/feed` — auth required, paginated (0.3).
+
+Posts authored by users the caller **follows** (NOT own posts — decision), `deleted_at IS NULL`, ordered by `posts.created_at DESC, posts.id DESC` (tie-breaker). Single SQL with JOIN on `follows`; `count` = total matching posts.
+
+**Response `data`:**
 
 ```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": {
-        "access_token": ""
-    }
-}
+{ "count": 0, "items": [ { "user_id": 0, "username": "", "post_id": 0, "caption": "",
+  "image_path": "", "likes_count": 0, "comments_count": 0, "created_at": "" } ] }
 ```
 
-# 3. POST /login
+`likes_count`/`comments_count` come from the denormalized columns. Following nobody → `{"count":0,"items":[]}` (200, not 404). Note: needs the `follows` repo — if T18 is not done, add a minimal `repo.Follow` interface now.
 
-### Step 1 — Parse request body
+**Acceptance:** feed shows only followed users' posts, newest first; pagination boundaries correct; empty feed → empty items.
 
-Parse the JSON body into a struct using `json.Unmarshal`.
+### T12. Like a post
 
-```go
-type LoginRequest struct {
-    Email    string `json:"email"`
-    Password string `json:"password"`
-}
-```
+`POST /api/v1/post/:post_id/like` — auth required (`:post_id` = bigint post id).
 
-### Step 2 — Validation
+In ONE transaction: insert into `likes` + increment `posts.like_count`.
 
-- `email` is required
-- `password` is required
+- Post missing or soft-deleted → 404.
+- Already liked (unique violation `23505` on `uq_likes_user_id_post_id`) → **409** message "post already liked" (and do NOT increment the counter — the tx rollback guarantees this).
+- Liking own post is allowed.
 
-If validation fails → return `400 Bad Request`.
+Create `internal/repo/persistent/like` (or fold into post repo — **decision: separate `repo.Like` interface, implemented in the post repo package is fine; keep interfaces separate**). Usecase: extend `usecase/post`.
 
-### Step 3 — Find user by email
+**Response `data`:** `null`.
 
-Query the DB:
+**Acceptance:** like increments `like_count` by exactly 1; double-like → 409 and counter unchanged.
 
-```sql
-SELECT id, username, email, full_name, is_active, password FROM users WHERE email = $1 LIMIT 1;
-```
+### T13. Unlike a post
 
-If no row is found → return `401 Unauthorized` (`invalid email or password`).
+`DELETE /api/v1/post/:post_id/like` — auth required.
 
-### Step 4 — Verify password
+In ONE transaction: delete like row + decrement `like_count`. If no like row existed → **409** message "post is not liked" (decision; do not decrement). Missing post → 404.
 
-Compare the provided password against the stored hash using `bcrypt`.
+**Acceptance:** unlike after like restores the original counter; unlike without like → 409.
 
-```go
-err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password))
-```
+### T14. View a single post
 
-If they don't match → return `401 Unauthorized` (`invalid email or password`).
+`GET /api/v1/post/:post_id` — public with optional auth (0.4).
 
-### Step 5 — Generate JWT access token
-
-JWT payload:
+**Response `data`:**
 
 ```json
-{
-    "user_id": 1,
-    "username": "",
-    "email": "",
-    "full_name": "",
-    "is_active": true
-}
+{ "post_id": 0, "user_id": 0, "username": "", "caption": "", "image_path": "",
+  "likes_count": 0, "comments_count": 0, "created_at": "", "is_liked": false }
 ```
 
-```go
-token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-accessToken, err := token.SignedString([]byte(secretKey))
-```
-
-### Step 6 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": {
-        "access_token": ""
-    }
-}
-```
-
-# 4. POST /logout
-
-### Step 1 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-
-### Step 2 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": null
-}
-```
-
-# 5. GET /users/:user_id
-
-### Step 1 — Parse path parameter
-
-Extract `user_id` from the URL path.
-If `user_id` is not a valid integer → return `400 Bad Request`.
-
-### Step 2 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-Extract `user_id` from the token claims (needed for `is_following` check).
-
-### Step 3 — Fetch user profile from DB
-
-```sql
-SELECT id, username, full_name, bio, avatar_path FROM users WHERE id = $1 LIMIT 1;
-```
-
-If no row is found → return `404 Not Found` (`user not found`).
-
-### Step 4 — Fetch posts count
-
-```sql
-SELECT COUNT(id) FROM posts WHERE user_id = $1 AND deleted_at IS NULL;
-```
-
-### Step 5 — Fetch followers count
-
-```sql
-SELECT 
-    COUNT(id) filter (where following_id = $1) as followers_count,
-    count(id) filter (where follower_id = $1) as following_count
-FROM follows;
-```
-
-### Step 6 — Check is_following
-
-If the requesting user's `user_id` (from JWT) equals the profile's `user_id` → set `is_following` = `null` (viewing own profile).
-Otherwise query the DB:
-
-```sql
-SELECT id FROM follows WHERE follower_id = $1 AND following_id = $2 LIMIT 1;
-```
-
-If a row is found → `is_following = true`, otherwise `is_following = false`.
-
-### Step 7 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": {
-        "user_id": 1,
-        "username": "",
-        "full_name": "",
-        "bio": "",
-        "avatar_path": "",
-        "posts_count": 0,
-        "followers_count": 0,
-        "following_count": 0,
-        "is_following": false
-    }
-}
-```
-
-# 6. GET /users/:user_id/posts
-
-### Step 1 — Parse path parameter
-
-Extract `user_id` from the URL path.
-If `user_id` is not a valid integer → return `400 Bad Request`.
-
-### Step 2 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-
-### Step 3 — Parse query parameters
-
-- `page` (default: 1)
-- `per_page` (default: 10)
-
-Calculate offset:
-
-```go
-offset := (page - 1) * perPage
-```
-
-### Step 4 — Fetch total count from DB
-
-```sql
-SELECT COUNT(id) FROM posts WHERE user_id = $1 AND deleted_at IS NULL;
-```
-
-### Step 5 — Fetch posts from DB
-
-```sql
-SELECT id, thumbnail_path, caption, created_at
-FROM posts
-WHERE user_id = $1 AND deleted_at IS NULL
-ORDER BY created_at DESC
-LIMIT $2 OFFSET $3;
-```
-
-If no rows found → return empty list.
-
-### Step 6 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": {
-        "count": 10,
-        "items": [
-            {
-                "post_id": 1,
-                "thumbnail_path": "",
-                "caption": "",
-                "created_at": ""
-            }
-        ]
-    }
-}
-```
-
-# 7. PUT /profile
-
-### Step 1 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-Extract `user_id` from the token claims.
-
-### Step 2 — Parse request body
-
-Request uses `Content-Type: multipart/form-data` because it may include an image file.
-Parse text fields using `r.FormValue()` and the avatar file using `r.FormFile()`.
-
-```go
-r.ParseMultipartForm(5 << 20) // 5 MB limit
-
-username := r.FormValue("username")
-fullName := r.FormValue("full_name")
-bio      := r.FormValue("bio")
-
-file, header, err := r.FormFile("avatar") // optional
-```
-
-### Step 3 — Validation
-
-All fields are optional, but at least one must be provided:
-- `username`
-- `full_name`
-- `bio`
-- `avatar`
-
-If none of the fields are provided → return `400 Bad Request` (`at least one field must be provided`).
-
-### Step 4 — Check username uniqueness
-
-If `username` is provided, first check if it differs from the current value. If changed, query the DB:
-
-```sql
-SELECT id FROM users WHERE username = $1 AND id != $2 LIMIT 1;
-```
-
-If a row is found → return `409 Conflict` (`username already exists`).
-
-### Step 5 — Validate and upload avatar (optional)
-
-If `avatar` file is provided:
-
-- Validate file size is not larger than **5 MB**. If it is → return `400 Bad Request` (`avatar must be at most 5 MB`).
-- Validate file type is an image (e.g., `image/jpeg`, `image/png`, `image/webp`). If invalid → return `400 Bad Request` (`invalid image format`).
-- Upload to storage and get back `avatar_path`.
-
-If not provided, keep the existing `avatar_path`.
-
-### Step 6 — Build dynamic UPDATE query
-
-Only include fields that were provided in the request.
-
-```sql
-UPDATE users
-SET username = $1, full_name = $2, bio = $3, avatar_path = $4, updated_at = now()
-WHERE id = $5;
-```
-
-If a field was not provided, keep its current value in the database.
-
-### Step 7 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": null
-}
-```
-
-# 8. POST /post
-
-### Step 1 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-Extract `user_id` from the token claims.
-
-### Step 2 — Parse request body
-
-Request uses `Content-Type: multipart/form-data` because it includes an image file.
-Parse text fields using `r.FormValue()` and the image file using `r.FormFile()`.
-
-```go
-r.ParseMultipartForm(10 << 20) // 10 MB limit
-
-caption := r.FormValue("caption")
-
-file, header, err := r.FormFile("image") // required
-```
-
-### Step 3 — Validation
-
-- `image` is required
-- `caption` is optional
-
-If validation fails → return `400 Bad Request`.
-
-### Step 4 — Validate and upload image
-
-- Validate file size is not larger than **10 MB**. If it is → return `400 Bad Request` (`image must be at most 10 MB`).
-- Validate file type is an image (e.g., `image/jpeg`, `image/png``). If invalid → return `400 Bad Request` (`invalid image format`).
-- Upload the image to storage and get back `image_path`.
-- Generate a thumbnail and get back `thumbnail_path`.
-
-### Step 5 — Insert post into DB
-
-```sql
-INSERT INTO posts (user_id, image_path, thumbnail_path, caption)
-VALUES ($1, $2, $3, $4)
-RETURNING id;
-```
-
-### Step 6 — Extract and save hashtags (if any)
-
-Parse `caption` for hashtags (e.g. `#nature`).
-For each hashtag:
-
-```sql
-INSERT INTO hashtags (name) VALUES ($1)
-ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
-RETURNING id;
-```
-
-```sql
-INSERT INTO post_hashtags (post_id, hashtag_id) VALUES ($1, $2)
-ON CONFLICT DO NOTHING;
-```
-
-### Step 7 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": null
-}
-```
-
-# 9. GET /feed
-
-### Step 1 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-Extract `user_id` from the token claims.
-
-### Step 2 — Parse query parameters
-
-- `page` (default: 1)
-- `per_page` (default: 10)
-
-### Step 3 — Fetch feed posts from DB
-
-```sql
-SELECT p.id, p.user_id, u.username, p.caption, p.thumbnail_path, p.likes_count, p.comments_count, p.created_at
-FROM posts p
-JOIN follows f ON f.following_id = p.user_id
-JOIN users u ON u.id = p.user_id
-WHERE f.follower_id = $1 AND p.deleted_at IS NULL
-ORDER BY p.created_at DESC
-LIMIT $2 OFFSET $3;
-```
-
-### Step 4 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": {
-        "count": 10,
-        "items": [
-            {
-                "user_id": 1,
-                "username": "",
-                "post_id": 1,
-                "caption": "",
-                "image_path": "",
-                "likes_count": 0,
-                "comments_count": 0,
-                "created_at": ""
-            }
-        ]
-    }
-}
-```
-
-# 10. POST /post/:post_id/like
-
-### Step 1 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-Extract `user_id` from the token claims.
-
-### Step 2 — Parse path parameter
-
-Extract `post_id` from the URL path.
-If `post_id` is not a valid integer → return `400 Bad Request`.
-
-### Step 3 — Check post exists
-
-```sql
-SELECT id FROM posts WHERE id = $1 AND deleted_at IS NULL LIMIT 1;
-```
-
-If no row found → return `404 Not Found` (`post not found`).
-
-### Step 4 — Insert like
-
-```sql
-INSERT INTO likes (user_id, post_id) VALUES ($1, $2)
-ON CONFLICT DO NOTHING;
-```
-
-### Step 5 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": null
-}
-```
-
-# 11. DELETE /post/:post_id/like
-
-### Step 1 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-Extract `user_id` from the token claims.
-
-### Step 2 — Parse path parameter
-
-Extract `post_id` from the URL path.
-If `post_id` is not a valid integer → return `400 Bad Request`.
-
-### Step 3 — Delete like
-
-```sql
-DELETE FROM likes WHERE user_id = $1 AND post_id = $2;
-```
-
-### Step 4 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": null
-}
-```
-
-# 12. GET /post/:post_id
-
-### Step 1 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-Extract `user_id` from the token claims.
-
-### Step 2 — Parse path parameter
-
-Extract `post_id` from the URL path.
-If `post_id` is not a valid integer → return `400 Bad Request`.
-
-### Step 3 — Fetch post from DB
-
-```sql
-SELECT p.id, p.user_id, u.username, p.caption, p.image_path, p.likes_count, p.comments_count, p.created_at
-FROM posts p
-JOIN users u ON u.id = p.user_id
-WHERE p.id = $1 AND p.deleted_at IS NULL
-LIMIT 1;
-```
-
-If no row found → return `404 Not Found` (`post not found`).
-
-### Step 4 — Check is_liked
-
-```sql
-SELECT id FROM likes WHERE user_id = $1 AND post_id = $2 LIMIT 1;
-```
-
-If a row is found → `is_liked = true`, otherwise `is_liked = false`.
-
-### Step 5 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": {
-        "post_id": 1,
-        "user_id": 1,
-        "username": "",
-        "caption": "",
-        "image_path": "",
-        "likes_count": 0,
-        "comments_count": 0,
-        "created_at": "",
-        "is_liked": false
-    }
-}
-```
-
-# 13. POST /post/:post_id/comments
-
-### Step 1 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-Extract `user_id` from the token claims.
-
-### Step 2 — Parse path parameter
-
-Extract `post_id` from the URL path.
-If `post_id` is not a valid integer → return `400 Bad Request`.
-
-### Step 3 — Parse request body
-
-```go
-type CreateCommentRequest struct {
-    Content string `json:"content"`
-}
-```
-
-### Step 4 — Validation
-
-- `content` is required
-
-If validation fails → return `400 Bad Request`.
-
-### Step 5 — Check post exists
-
-```sql
-SELECT id FROM posts WHERE id = $1 AND deleted_at IS NULL LIMIT 1;
-```
-
-If no row found → return `404 Not Found` (`post not found`).
-
-### Step 6 — Insert comment into DB
-
-```sql
-INSERT INTO comments (user_id, post_id, content) VALUES ($1, $2, $3);
-```
-
-### Step 7 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": null
-}
-```
-
-# 14. DELETE /comments/:comment_id
+- `is_liked` = caller has liked it (false when unauthenticated).
+- Soft-deleted or unknown id → 404. Non-numeric `post_id` → 400 with field `post_id`.
 
-### Step 1 — Validate access token
+**Acceptance:** counts match reality; `is_liked` correct per caller; deleted post → 404.
 
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-Extract `user_id` from the token claims.
+### T15. Comment on a post
 
-### Step 2 — Parse path parameter
+Two endpoints:
 
-Extract `comment_id` from the URL path.
-If `comment_id` is not a valid integer → return `400 Bad Request`.
+1. `POST /api/v1/post/:post_id/comments` — auth required. Body: `{ "content": "" }`, required, 1–2048 chars after trimming whitespace. In ONE transaction: insert comment + increment `posts.comment_count`. Missing/deleted post → 404. Response `data`: `null`.
+2. `GET /api/v1/post/:post_id/comments` — public, paginated (0.3), ordered `created_at ASC, id ASC` (oldest first — decision), excluding soft-deleted comments.
 
-### Step 3 — Fetch comment from DB
+**List response `data`:** `{ "count": 0, "items": [ { "comment_id": 0, "post_id": 0, "user_id": 0, "username": "", "content": "", "created_at": "" } ] }` (include `comment_id` — needed for T16 even though LLD omits it).
 
-```sql
-SELECT id, user_id, post_id FROM comments WHERE id = $1 AND deleted_at IS NULL LIMIT 1;
-```
-
-If no row found → return `404 Not Found` (`comment not found`).
-
-### Step 4 — Check permission
-
-The requesting user must be the author of the comment OR the author of the post.
-
-```sql
-SELECT id FROM posts WHERE id = $1 AND user_id = $2 LIMIT 1;
-```
-
-If the requesting user is neither the comment author nor the post author → return `403 Forbidden`.
-
-### Step 5 — Soft delete comment
-
-```sql
-UPDATE comments SET deleted_at = now() WHERE id = $1;
-```
-
-### Step 6 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": null
-}
-```
-
-# 15. GET /post/:post_id/comments
-
-### Step 1 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-
-### Step 2 — Parse path and query parameters
-
-Extract `post_id` from the URL path.
-If `post_id` is not a valid integer → return `400 Bad Request`.
-
-- `page` (default: 1)
-- `per_page` (default: 10)
-
-### Step 3 — Check post exists
-
-```sql
-SELECT id FROM posts WHERE id = $1 AND deleted_at IS NULL LIMIT 1;
-```
-
-If no row found → return `404 Not Found` (`post not found`).
-
-### Step 4 — Fetch comments from DB
-
-```sql
-SELECT c.id, c.user_id, u.username, c.content, c.created_at
-FROM comments c
-JOIN users u ON u.id = c.user_id
-WHERE c.post_id = $1 AND c.deleted_at IS NULL
-ORDER BY c.created_at ASC
-LIMIT $2 OFFSET $3;
-```
-
-### Step 5 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": {
-        "count": 10,
-        "items": [
-            {
-                "post_id": 1,
-                "user_id": 1,
-                "username": "",
-                "content": "",
-                "created_at": ""
-            }
-        ]
-    }
-}
-```
-
-# 16. DELETE /post/:post_id
-
-### Step 1 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-Extract `user_id` from the token claims.
-
-### Step 2 — Parse path parameter
-
-Extract `post_id` from the URL path.
-If `post_id` is not a valid integer → return `400 Bad Request`.
-
-### Step 3 — Fetch post from DB
-
-```sql
-SELECT id, user_id FROM posts WHERE id = $1 AND deleted_at IS NULL LIMIT 1;
-```
-
-If no row found → return `404 Not Found` (`post not found`).
-
-### Step 4 — Check ownership
-
-If the requesting user's `user_id` (from JWT) does not match the post's `user_id` → return `403 Forbidden`.
-
-### Step 5 — Soft delete post
-
-```sql
-UPDATE posts SET deleted_at = now() WHERE id = $1;
-```
-
-### Step 6 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": null
-}
-```
-
-# 17. POST /users/:user_id/follow
-
-### Step 1 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-Extract `follower_id` (requesting user) from the token claims.
-
-### Step 2 — Parse path parameter
-
-Extract `user_id` (the user to follow) from the URL path.
-If `user_id` is not a valid integer → return `400 Bad Request`.
-
-### Step 3 — Prevent self-follow
-
-If `follower_id` == `user_id` → return `400 Bad Request` (`cannot follow yourself`).
-
-### Step 4 — Check target user exists
-
-```sql
-SELECT id FROM users WHERE id = $1 LIMIT 1;
-```
-
-If no row found → return `404 Not Found` (`user not found`).
-
-### Step 5 — Insert follow
-
-```sql
-INSERT INTO follows (follower_id, following_id) VALUES ($1, $2)
-ON CONFLICT DO NOTHING;
-```
-
-### Step 6 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": null
-}
-```
-
-# 18. DELETE /users/:user_id/follow
-
-### Step 1 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-Extract `follower_id` from the token claims.
-
-### Step 2 — Parse path parameter
-
-Extract `user_id` (the user to unfollow) from the URL path.
-If `user_id` is not a valid integer → return `400 Bad Request`.
-
-### Step 3 — Delete follow
-
-```sql
-DELETE FROM follows WHERE follower_id = $1 AND following_id = $2;
-```
-
-### Step 4 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": null
-}
-```
-
-# 19. GET /notifications
-
-### Step 1 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-Extract `user_id` from the token claims.
-
-### Step 2 — Parse query parameters
-
-- `page` (default: 1)
-- `per_page` (default: 10)
-
-### Step 3 — Fetch notifications from DB
-
-```sql
-SELECT n.id, n.action_type, n.message, n.is_read, n.created_at,
-       n.actor_id, n.post_id, n.comment_id
-FROM notifications n
-WHERE n.user_id = $1
-ORDER BY n.created_at DESC
-LIMIT $2 OFFSET $3;
-```
-
-### Step 4 — Fetch actor details for each notification
-
-```sql
-SELECT id, username, full_name, avatar_path FROM users WHERE id = $1 LIMIT 1;
-```
-
-Check if the requesting user follows the actor:
-
-```sql
-SELECT id FROM follows WHERE follower_id = $1 AND following_id = $2 LIMIT 1;
-```
-
-### Step 5 — Fetch post details (if post_id is not null)
-
-```sql
-SELECT id, user_id, caption, image_path, created_at FROM posts WHERE id = $1 AND deleted_at IS NULL LIMIT 1;
-```
-
-Get post owner username:
-
-```sql
-SELECT username FROM users WHERE id = $1 LIMIT 1;
-```
-
-### Step 6 — Fetch comment details (if comment_id is not null)
-
-```sql
-SELECT c.id, u.username, c.content, c.created_at
-FROM comments c
-JOIN users u ON u.id = c.user_id
-WHERE c.id = $1 AND c.deleted_at IS NULL LIMIT 1;
-```
-
-### Step 7 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": {
-        "count": 10,
-        "items": [
-            {
-                "notification_id": 1,
-                "action_type": "",
-                "message": "",
-                "actor": {
-                    "user_id": 1,
-                    "username": "",
-                    "full_name": "",
-                    "avatar_path": "",
-                    "is_following": false
-                },
-                "post": {
-                    "post_id": 1,
-                    "username": "",
-                    "caption": "",
-                    "image_path": "",
-                    "created_at": ""
-                },
-                "comment": {
-                    "comment_id": 1,
-                    "username": "",
-                    "content": "",
-                    "created_at": ""
-                },
-                "is_read": false,
-                "created_at": ""
-            }
-        ]
-    }
-}
-```
-
-# 20. POST /notification/:notification_id/read
-
-### Step 1 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-Extract `user_id` from the token claims.
-
-### Step 2 — Parse path parameter
-
-Extract `notification_id` from the URL path.
-If `notification_id` is not a valid integer → return `400 Bad Request`.
-
-### Step 3 — Check notification exists and belongs to user
-
-```sql
-SELECT id, user_id FROM notifications WHERE id = $1 LIMIT 1;
-```
-
-If no row found → return `404 Not Found` (`notification not found`).
-If `user_id` does not match → return `403 Forbidden`.
-
-### Step 4 — Mark as read
-
-```sql
-UPDATE notifications SET is_read = true, updated_at = now() WHERE id = $1;
-```
-
-### Step 5 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": null
-}
-```
-
-# 21. GET /users?query=
-
-### Step 1 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-
-### Step 2 — Parse query parameters
-
-- `query` is required
-- `page` (default: 1)
-- `per_page` (default: 10)
-
-If `query` is empty → return `400 Bad Request`.
-
-### Step 3 — Search users in DB
-
-```sql
-SELECT id, username, full_name, avatar_path
-FROM users
-WHERE username ILIKE '%' || $1 || '%' OR full_name ILIKE '%' || $1 || '%'
-ORDER BY username ASC
-LIMIT $2 OFFSET $3;
-```
-
-### Step 4 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": {
-        "count": 10,
-        "items": [
-            {
-                "user_id": 1,
-                "username": "",
-                "full_name": "",
-                "avatar_path": ""
-            }
-        ]
-    }
-}
-```
-
-# 22. GET /hashtags?query=
-
-### Step 1 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-
-### Step 2 — Parse query parameters
-
-- `query` is required
-- `page` (default: 1)
-- `per_page` (default: 10)
-
-If `query` is empty → return `400 Bad Request`.
-
-### Step 3 — Search hashtags in DB
-
-```sql
-SELECT h.name, COUNT(ph.post_id) AS post_count
-FROM hashtags h
-LEFT JOIN post_hashtags ph ON ph.hashtag_id = h.id
-WHERE h.name ILIKE '%' || $1 || '%'
-GROUP BY h.name
-ORDER BY post_count DESC
-LIMIT $2 OFFSET $3;
-```
+Create `internal/repo/persistent/comment` + `repo.Comment` interface; usecase `usecase/comment` (or extend post usecase — **decision: separate `usecase/comment` package**). Handler `v1/comment.go`.
 
-### Step 4 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": {
-        "count": 10,
-        "items": [
-            {
-                "name": "",
-                "post_count": 0
-            }
-        ]
-    }
-}
-```
-
-# 23. GET /hashtags/:name/posts
-
-### Step 1 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-
-### Step 2 — Parse path and query parameters
-
-Extract `name` from the URL path.
-- `page` (default: 1)
-- `per_page` (default: 10)
-
-### Step 3 — Check hashtag exists
-
-```sql
-SELECT id FROM hashtags WHERE name = $1 LIMIT 1;
-```
-
-If no row found → return `404 Not Found` (`hashtag not found`).
-
-### Step 4 — Fetch posts by hashtag
-
-```sql
-SELECT p.id, p.user_id, u.username, p.caption, p.thumbnail_path, p.likes_count, p.comments_count, p.created_at
-FROM posts p
-JOIN post_hashtags ph ON ph.post_id = p.id
-JOIN hashtags h ON h.id = ph.hashtag_id
-JOIN users u ON u.id = p.user_id
-WHERE h.name = $1 AND p.deleted_at IS NULL
-ORDER BY p.created_at DESC
-LIMIT $2 OFFSET $3;
-```
-
-### Step 5 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": {
-        "count": 10,
-        "items": [
-            {
-                "post_id": 1,
-                "user_id": 1,
-                "username": "",
-                "caption": "",
-                "thumbnail_path": "",
-                "likes_count": 0,
-                "comments_count": 0,
-                "created_at": ""
-            }
-        ]
-    }
-}
-```
-
-# 24. GET /profile/followers
-
-### Step 1 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-Extract `user_id` from the token claims.
-
-### Step 2 — Parse query parameters
-
-- `page` (default: 1)
-- `per_page` (default: 10)
-
-### Step 3 — Fetch followers from DB
-
-```sql
-SELECT u.id, u.username, u.full_name, u.avatar_path
-FROM follows f
-JOIN users u ON u.id = f.follower_id
-WHERE f.following_id = $1
-ORDER BY f.created_at DESC
-LIMIT $2 OFFSET $3;
-```
+**Acceptance:** comment increments `comment_count`; empty/whitespace content → 400; list pagination + ordering correct.
 
-### Step 4 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": {
-        "count": 10,
-        "items": [
-            {
-                "user_id": 1,
-                "username": "",
-                "full_name": "",
-                "avatar_path": ""
-            }
-        ]
-    }
-}
-```
-
-# 25. GET /profile/following
-
-### Step 1 — Validate access token
-
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-Extract `user_id` from the token claims.
-
-### Step 2 — Parse query parameters
-
-- `page` (default: 1)
-- `per_page` (default: 10)
-
-### Step 3 — Fetch following from DB
-
-```sql
-SELECT u.id, u.username, u.full_name, u.avatar_path
-FROM follows f
-JOIN users u ON u.id = f.following_id
-WHERE f.follower_id = $1
-ORDER BY f.created_at DESC
-LIMIT $2 OFFSET $3;
-```
-
-### Step 4 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": {
-        "count": 10,
-        "items": [
-            {
-                "user_id": 1,
-                "username": "",
-                "full_name": "",
-                "avatar_path": ""
-            }
-        ]
-    }
-}
-```
+### T16. Delete a comment
 
-# 26. PUT /post/:post_id
+`DELETE /api/v1/comments/:comment_id` — auth required (`:comment_id` = bigint id).
 
-### Step 1 — Validate access token
+- Allowed for the **comment author OR the author of the post** the comment belongs to. Anyone else → **403**.
+- Soft delete (`deleted_at = NOW()`) + decrement `posts.comment_count` in one transaction.
+- Already-deleted or unknown comment → 404.
 
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-Extract `user_id` from the token claims.
+**Acceptance:** author and post owner can delete; third user → 403; counter decrements once; second delete → 404.
 
-### Step 2 — Parse path parameter
+### T17. Delete a post
 
-Extract `post_id` from the URL path.
-If `post_id` is not a valid integer → return `400 Bad Request`.
+`DELETE /api/v1/post/:post_id` — auth required.
 
-### Step 3 — Parse request body
+- Only the post owner. Someone else's post → **403** (post exists but not yours), unknown/already-deleted → 404. Check existence BEFORE ownership so 403 vs 404 is deterministic.
+- Soft-delete the post row (`deleted_at = NOW()`).
+- **Storage cleanup:** delete the original image and thumbnail files from disk AFTER the DB update commits (best-effort: log failures, do not fail the request). Likes/comments rows stay (post is filtered out everywhere by `deleted_at IS NULL`).
 
-```go
-type UpdatePostRequest struct {
-    Caption string `json:"caption"`
-}
-```
+**Response `data`:** `null`.
 
-### Step 4 — Fetch post from DB
+**Acceptance:** owner deletes → post disappears from feed/profile/single-view; files removed from disk; non-owner → 403.
 
-```sql
-SELECT id, user_id FROM posts WHERE id = $1 AND deleted_at IS NULL LIMIT 1;
-```
+---
 
-If no row found → return `404 Not Found` (`post not found`).
+## Epic 3 — Social Graph
 
-### Step 5 — Check ownership
+### T18. Follow / unfollow
 
-If the requesting user's `user_id` (from JWT) does not match the post's `user_id` → return `403 Forbidden`.
+Endpoints (**decision: address by user_id, not username**):
 
-### Step 6 — Update post in DB
+1. `POST /api/v1/users/:user_id/follow` — auth required. Insert into `follows (follower_id=caller, following_id=:user_id)`.
+   - `:user_id` == caller → **400** message "cannot follow yourself" (validate BEFORE any DB call).
+   - Target user missing/inactive → 404.
+   - Already following (`23505` on `uq_follows_follower_following`) → **409** "already following".
+2. `DELETE /api/v1/users/:user_id/follow` — auth required. Delete the row; not following → **409** "not following"; missing target → 404.
 
-```sql
-UPDATE posts SET caption = $1, updated_at = now() WHERE id = $2;
-```
+No follower-count denormalization (T7 computes counts live). Response `data`: `null` for both.
 
-### Step 7 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": null
-}
-```
+Create `internal/repo/persistent/follow` + `repo.Follow` (may already exist minimally from T11 — extend it); usecase `usecase/user` extension or `usecase/follow` — **decision: put Follow/Unfollow into `usecase/user`**.
 
-# 27. PUT /comments/:comment_id
+**Acceptance:** follow then T7 counts update; self-follow → 400; duplicate → 409; unfollow reverses everything.
 
-### Step 1 — Validate access token
+---
 
-Read the `Authorization` header and verify the JWT token.
-If missing or invalid → return `401 Unauthorized`.
-Extract `user_id` from the token claims.
+## Epic 4 — Engagement & Discovery
 
-### Step 2 — Parse path parameter
+### T19. Notifications
 
-Extract `comment_id` from the URL path.
-If `comment_id` is not a valid integer → return `400 Bad Request`.
+Uses the existing `notifications` table (`action_type` enum: `like|comment|follow`).
 
-### Step 3 — Parse request body
+**Creation (side effects added to T12/T15/T18 usecases):**
+- like → notify post owner (`actor_id`=liker, `post_id` set)
+- comment → notify post owner (`comment_id` + `post_id` set)
+- follow → notify followed user (`actor_id`=follower)
+- **Never notify yourself** (liking/commenting your own post → no notification).
+- **Decision:** create the notification in the SAME transaction as the triggering write. `message` column: leave NULL (clients render from `action_type`). No notification deletion on unlike/uncomment (MVP).
 
-```go
-type UpdateCommentRequest struct {
-    Content string `json:"content"`
-}
-```
+**Endpoints:**
 
-### Step 4 — Validation
+1. `GET /api/v1/notifications` — auth required, paginated, caller's notifications newest first.
+   **Response `data`:** `{ "count": 0, "items": [ { "notification_id": 0, "action_type": "like", "actor_id": 0, "actor_username": "", "post_id": 0, "is_read": false, "created_at": "" } ] }`
+2. `PUT /api/v1/notifications/:notification_id/read` — auth required, sets `is_read=true`. Not the caller's notification → 404 (not 403 — don't leak existence). Already read → 200 idempotent. Response `data`: `null`.
 
-- `content` is required
+Create `repo.Notification` + `internal/repo/persistent/notification`, `usecase/notification`, handler `v1/notification.go`.
 
-If validation fails → return `400 Bad Request`.
+**Acceptance:** like/comment/follow each produce exactly one notification for the right user; self-actions produce none; mark-read is idempotent and owner-scoped.
 
-### Step 5 — Fetch comment from DB
+### T20. Search users
 
-```sql
-SELECT id, user_id FROM comments WHERE id = $1 AND deleted_at IS NULL LIMIT 1;
-```
+`GET /api/v1/search/users?q=<term>` — auth optional (public), paginated (0.3).
 
-If no row found → return `404 Not Found` (`comment not found`).
+- `q`: required, 1–32 chars after trim; missing/empty → 400 field `q`.
+- Match: case-insensitive **substring** on username — `WHERE username ILIKE '%' || $1 || '%'`, escape `%`/`_` in user input. Order: exact match first, then prefix matches, then alphabetical (`ORDER BY (username = q) DESC, (username LIKE q || '%') DESC, username ASC`). Only `is_active = true`.
 
-### Step 6 — Check ownership
+**Response `data`:** `{ "count": 0, "items": [ { "user_id": 0, "username": "", "full_name": "", "avatar_path": "" } ] }`
 
-If the requesting user's `user_id` (from JWT) does not match the comment's `user_id` → return `403 Forbidden`.
+Extend user repo + `usecase/user`; route in `v1/user.go`.
 
-### Step 7 — Update comment in DB
+**Acceptance:** substring matching works; exact match ranks first; `%` in query doesn't match everything; pagination correct.
 
-```sql
-UPDATE comments SET content = $1, updated_at = now() WHERE id = $2;
-```
+### T21. Hashtags
 
-### Step 8 — Return response
-
-```json
-{
-    "status": "ok",
-    "description": "The request has succeeded",
-    "data": null
-}
-```
+Uses existing `hashtags` + `post_hashtags` tables.
 
-# 28. Like/Unlike Cache Implementation
+**Parsing (extends T9 create-post usecase):**
+- Extract hashtags from caption with regex `#([\p{L}\p{N}_]+)` — lowercase them, dedupe, cap at first **30** tags, each max 64 chars (skip longer ones).
+- Upsert: `INSERT INTO hashtags(name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id`, then insert `post_hashtags` pairs (`ON CONFLICT DO NOTHING`). Same transaction as post creation.
 
-## Goal
+**Search endpoint:** `GET /api/v1/search/posts?tag=<name>` — public, paginated.
+- `tag`: required, leading `#` stripped if present, lowercased; empty → 400.
+- Posts joined through `post_hashtags`, `deleted_at IS NULL`, newest first.
+- Unknown tag → 200 with empty items.
 
-Buffer like and unlike events in cache before writing them to the database. A cron job runs every 1 minute to flush cached events to the DB.
+**Response `data`:** `{ "count": 0, "items": [ { "post_id": 0, "user_id": 0, "username": "", "thumbnail_path": "", "caption": "", "likes_count": 0, "comments_count": 0, "created_at": "" } ] }`
 
-## Cache structure
+Create `repo.Hashtag` + `internal/repo/persistent/hashtag`; parsing lives in `usecase/post`; search in `usecase/post` too; route in `v1/post.go`.
 
-There are two separate cache responsibilities:
+**Acceptance:** caption "sunset #Beach #beach_life" creates tags `beach`, `beach_life` linked to the post; searching `beach` (or `#Beach`) returns it; deleted posts excluded.
 
-1. **User like state cache** — stores per-user like/unlike state until it is flushed to the DB.
-2. **Like counter cache** — fast read path for current like count, with a timestamp used by the flush worker.
+---
 
-### 1. User like state cache
+## Epic 5 — Performance
 
-- **Key:** `like:{user_id}:{post_id}`
-- **Type:** Redis String (integer)
-- **Value:** `1` = user has liked the post; `0` = user has unliked the post
-- **When written:** On every like or unlike event.
-- **When read:** Sync worker reads it before flushing to the database; read path checks `is_liked`.
-- **When deleted:** After successful database flush, or when a pending action is cancelled.
+### T22. Redis caching layer
 
-### 2. Like counter cache
+Add cache-aside caching on top of the finished endpoints. Implement in the **usecase layer** (inject the redis client / a small cache interface into usecases via `app.go`), not in handlers or repos.
 
-- **Key:** `like-count:{post_id}`
-- **Type:** Redis Hash
-- **Fields:**
-  - `count` (integer) — current like count.
-  - `updated_at` (integer) — last unix timestamp (seconds) when the count changed.
-- **When updated:** On every like or unlike event.
-- **When read:** When returning post details or feed.
-- **When deleted:** When the post is deleted or on cache miss.
+**What to cache (JSON-serialized DTOs):**
 
-## Handling like
+| Data | Key | TTL |
+|---|---|---|
+| Single post base data (T14, WITHOUT `is_liked`) | `post:<post_id>` | 60s |
+| User profile base data (T7, WITHOUT `is_following`) | `user:profile:<user_id>` | 60s |
+| Feed page (T11, per user+page) | `feed:<user_id>:<page>:<per_page>` | 30s |
 
-When a user likes a post:
+**Read path:** try Redis → hit: unmarshal, then compute `is_liked`/`is_following` from DB per-caller → miss or Redis error: query DB, `SET` with TTL (best-effort), return.
 
-1. If `like:{user_id}:{post_id}` exists and equals `0`:
-   - Delete the key (cancel the pending unlike).
-2. Otherwise:
-   - Set `like:{user_id}:{post_id}` to `1`.
-3. Increment `like-count:{post_id}` `count` by 1.
-4. Update `like-count:{post_id}` `updated_at` to the current unix timestamp.
+**Invalidation (explicit `DEL`, best-effort, after the DB tx commits):**
+- like/unlike/comment/comment-delete on a post → `DEL post:<post_id>`
+- post delete → `DEL post:<post_id>` + `DEL user:profile:<owner_id>`
+- post create → `DEL user:profile:<owner_id>`
+- profile update (T8) → `DEL user:profile:<user_id>`
+- follow/unfollow → `DEL user:profile:<target_id>` and `DEL user:profile:<follower_id>` (counts changed)
+- feed keys: NOT explicitly invalidated — 30s TTL staleness is accepted (decision)
 
-```go
-// Pseudocode
-if redis.Get(likeKey(userID, postID)) == "0" {
-    redis.Del(likeKey(userID, postID))
-} else {
-    redis.Set(likeKey(userID, postID), "1")
-}
-redis.HIncrBy(likeCountKey(postID), "count", 1)
-redis.HSet(likeCountKey(postID), "updated_at", nowUnix())
-```
+**Acceptance:** second read of a post/profile within TTL does not hit Postgres (verify via logs or a repo call counter in tests); like immediately reflects in `likes_count` on next read (invalidation works); stopping Redis keeps all endpoints functional.
 
-## Handling unlike
-
-When a user unlikes a post:
-
-1. If `like:{user_id}:{post_id}` exists and equals `1`:
-   - Delete the key (cancel the pending like).
-2. Otherwise:
-   - Set `like:{user_id}:{post_id}` to `0`.
-3. Decrement `like-count:{post_id}` `count` by 1, but not below 0.
-4. Update `like-count:{post_id}` `updated_at` to the current unix timestamp.
-
-```go
-// Pseudocode
-if redis.Get(likeKey(userID, postID)) == "1" {
-    redis.Del(likeKey(userID, postID))
-} else {
-    redis.Set(likeKey(userID, postID), "0")
-}
-current := redis.HGet(likeCountKey(postID), "count")
-if current > 0 {
-    redis.HIncrBy(likeCountKey(postID), "count", -1)
-}
-redis.HSet(likeCountKey(postID), "updated_at", nowUnix())
-```
+---
 
-## Cron job — flush cache to DB every 1 minute
-
-The worker keeps the timestamp of the last successful flush (`lastFlushAt`). On each run it processes only the records that changed since then. On the first run, `lastFlushAt` is `0`, so all cached counters are flushed.
-
-### 1. Flush user like states
-
-Scan all keys matching `like:*:*`.
-
-For each key:
-
-- Parse `user_id` and `post_id` from the key.
-- Read the value.
-- If value is `1`:
-  ```sql
-  INSERT INTO likes (user_id, post_id) VALUES ($1, $2)
-  ON CONFLICT DO NOTHING;
-  ```
-- If value is `0`:
-  ```sql
-  DELETE FROM likes WHERE user_id = $1 AND post_id = $2;
-  ```
-- Delete the processed key.
-
-### 2. Flush like counts
-
-1. Scan all keys matching `like-count:*`.
-2. For each key, read `count` and `updated_at`.
-3. If `updated_at > lastFlushAt`:
-   - Update the post row:
-     ```sql
-     UPDATE posts SET likes_count = $1, updated_at = now() WHERE id = $2;
-     ```
-4. Remember the current time as `lastFlushAt` for the next run.
-
-```go
-// Pseudocode
-now := time.Now().Unix()
-for _, key := range redis.Scan("like-count:*") {
-    postID := parsePostID(key)
-    count := redis.HGet(key, "count")
-    updatedAt := redis.HGet(key, "updated_at")
-    if updatedAt > lastFlushAt {
-        db.Exec("UPDATE posts SET likes_count = ?, updated_at = now() WHERE id = ?", count, postID)
-    }
-}
-lastFlushAt = now
-```
+## Final checklist (after T22)
 
-## Read path
-
-### Like count
-
-When returning a single post, a feed, or any post list (hashtag, profile, etc.), the like count must always be served from cache.
-
-For each `post_id`:
-
-1. Read `count` field from `like-count:{post_id}`.
-2. If cache miss:
-   - Compute the count from DB:
-     ```sql
-     SELECT COUNT(*) FROM likes WHERE post_id = $1;
-     ```
-   - Write the result to cache:
-     ```go
-     redis.HSet(likeCountKey(postID), "count", dbCount)
-     redis.HSet(likeCountKey(postID), "updated_at", 0)
-     ```
-3. Return the value that is now in cache.
-
-### is_liked
-
-1. Read `like:{user_id}:{post_id}` from cache.
-   - If value is `1` → `is_liked = true`.
-   - If value is `0` → `is_liked = false`.
-2. If cache miss, query the DB:
-   ```sql
-   SELECT id FROM likes WHERE user_id = $1 AND post_id = $2 LIMIT 1;
-   ```
-   - If row exists → `is_liked = true`.
-   - Otherwise → `is_liked = false`.
+- `go build ./... && go vet ./... && go test ./...` clean.
+- `.env.example` contains every env var used (`HTTP_PORT`, `POSTGRES_URL`, `POSTGRES_POOL_MAX`, `LOG_LEVEL`, `JWT_SECRET`, `STORAGE_DIR`, `REDIS_URL`).
+- Redis outage does not break any endpoint (fail-open verified).
+- All routes registered in `v1/router.go` grouped by domain with correct middleware (auth / optional-auth / rate-limit).
+- Every list endpoint paginated per 0.3; every post read filters `deleted_at IS NULL`.

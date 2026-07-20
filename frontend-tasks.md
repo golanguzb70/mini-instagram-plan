@@ -8,7 +8,7 @@ Design source: `pen/mini-instagram.pen` (Pen file, app name **"Lumen"**). Backen
 
 ### 0.1 Stack & structure
 
-React 18 + TypeScript + Vite. Desktop-first (design is 1440×900; only one mobile frame exists — see 0.5).
+React 18 + TypeScript + Vite. Web-only (desktop). Target viewport 1440×900; no mobile/tablet layout required.
 
 ```
 mini-instagram-web/
@@ -100,7 +100,7 @@ Fonts: `--font-primary` = **JetBrains Mono** (body/UI), `--font-secondary` = **G
 
 - **Desktop / Edit Comment** — backend has no edit-comment endpoint. SKIP; do not build.
 - **Desktop / Create Profile** — sign-up already collects full_name/bio, avatar comes later via Edit Profile. SKIP as a separate step; its avatar-upload UI is reused in F14.
-- **Mobile / Tag Results** — the only mobile frame. MVP is desktop-first; see F18 for the minimal responsive pass.
+- **Mobile / Tag Results** — web-only scope; no mobile implementation. SKIP.
 
 **Known API gaps (pre-answered — follow, do not ask):**
 
@@ -278,13 +278,13 @@ Route `/notifications`, frame **Desktop / Notifications**: newest-first list fro
 
 ## Epic 6 — Polish
 
-### F18. Responsive pass + UX states
+### F18. UX states & final pass
 
-- Minimal responsive behavior below `lg`: sidebar collapses to an icon-only rail (64px); below `md` it becomes a bottom tab bar (matches the **Mobile / Tag Results** TabBar pattern). Grids drop to 3→2 columns on small screens; feed column goes full-width.
 - Audit every page for the four states: loading (skeletons), error (toast/retry), empty (designed empty states), success. Global toaster mounted once in `AppLayout`.
 - Image UX: `loading="lazy"` on grid/feed images, fixed aspect-ratio boxes to prevent layout shift, broken-image fallback block.
+- Confirm fixed 1440×900 desktop layout throughout; no responsive breakpoints or mobile variants.
 
-**Acceptance:** app is usable at 390px width; no layout shift while images load; every list page has a visible empty state.
+**Acceptance:** every list page has a visible empty state; no layout shift while images load; layout remains consistent at 1440px width.
 
 ### F19. Build, tests & smoke check
 

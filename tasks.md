@@ -1,3 +1,4 @@
+
 # Mini Instagram — Implementation Tasks
 
 ---
@@ -48,15 +49,15 @@ mini-instagram/
 
 ### 0.2 Packages (already in go.mod — do not add others unless a task says so)
 
-| Package | Purpose |
-|---|---|
-| `github.com/gin-gonic/gin` | HTTP framework |
-| `github.com/go-playground/validator/v10` | input validation |
-| `github.com/jackc/pgx/v5` (pgxpool) | PostgreSQL driver |
-| `github.com/golang-jwt/jwt/v5` | JWT tokens |
-| `golang.org/x/crypto` (bcrypt) | password hashing |
-| `github.com/caarlos0/env/v11`, `github.com/joho/godotenv` | config |
-| `github.com/redis/go-redis/v9` | Redis — rate limiting + cache (add to go.mod in T3) |
+| Package                                                       | Purpose                                              |
+| ------------------------------------------------------------- | ---------------------------------------------------- |
+| `github.com/gin-gonic/gin`                                  | HTTP framework                                       |
+| `github.com/go-playground/validator/v10`                    | input validation                                     |
+| `github.com/jackc/pgx/v5` (pgxpool)                         | PostgreSQL driver                                    |
+| `github.com/golang-jwt/jwt/v5`                              | JWT tokens                                           |
+| `golang.org/x/crypto` (bcrypt)                              | password hashing                                     |
+| `github.com/caarlos0/env/v11`, `github.com/joho/godotenv` | config                                               |
+| `github.com/redis/go-redis/v9`                              | Redis — rate limiting + cache (add to go.mod in T3) |
 
 Allowed additions (only when a task requires): `golang.org/x/image/draw` or `github.com/disintegration/imaging` (thumbnails) — prefer stdlib `image` first.
 
@@ -86,10 +87,7 @@ Allowed additions (only when a task requires): `golang.org/x/image/draw` or `git
 - **Allowed image types**: jpeg, png, webp — detect by content sniffing (`http.DetectContentType`), not extension. Reject others with 400.
 - **Redis**: used for rate limiting AND data cache. Create `pkg/redis` (go-redis v9 client wrapper, ping on startup), env `REDIS_URL` (add to config + `.env.example`, e.g. `redis://localhost:6379/0`). Wire in `internal/app/app.go`. **Fail-open policy**: if Redis is unavailable, log the error and continue — rate limiting allows the request, caching falls through to the DB. Redis errors must NEVER fail a user request.
 - **Rate limiting**: Redis-backed, keyed by email. Keys `rl:signup:<email>` / `rl:login:<email>`; algorithm: `INCR` + `EXPIRE 60s` on first hit; count > 5 → **429**. Implement as reusable gin middleware in `internal/controller/restapi/v1/middleware.go`. Limit: 5 requests per minute per email for `/sign-up` and `/login`.
-- **Caching**: cache-aside pattern via Redis, JSON-serialized values. Cache only caller-independent data (never cache `is_liked` / `is_following` — compute those per-request from the DB). Keys/TTLs and invalidation are specified in T22; implement caching ONLY in T22 (after all endpoints work against the DB), not while building T7/T11/T14.
 - **Passwords**: bcrypt, cost `bcrypt.DefaultCost`. Never log or return passwords.
-- **Soft delete**: posts and comments use `deleted_at` (columns already exist). All read queries must filter `deleted_at IS NULL`. Physical files ARE deleted from storage on post delete.
-- **Denormalized counters**: `posts.like_count` and `posts.comment_count` are updated in the same transaction as the like/comment insert/delete (`UPDATE posts SET like_count = like_count + 1 ...`). Read endpoints use these columns, never `COUNT(*)` over likes/comments.
 - **Errors**: sentinel errors in `internal/entity/errors.go` (`ErrNotFound` exists; add `ErrEmailTaken`, `ErrUsernameTaken`, `ErrInvalidCredentials`, `ErrForbidden`, `ErrAlreadyLiked`, `ErrNotLiked`, `ErrAlreadyFollowing`, `ErrNotFollowing`, `ErrSelfFollow` as needed). Usecases return these; handlers map them to HTTP codes with `errors.Is`.
 - **Migrations**: schema already exists in `migrations/20260716000001_create_instagram_tables.up.sql` (users, posts, likes, follows, comments, notifications, hashtags, post_hashtags). Do NOT recreate tables. If a task needs a schema change, add a NEW timestamped up/down migration pair.
 - **Testing**: unit tests for usecases with hand-written repo fakes (implement repo interfaces in `_test.go` files). No testcontainers/mocks libraries. Handlers verified via `httptest` where cheap. Run `go build ./... && go vet ./... && go test ./...` after every task.
@@ -114,6 +112,7 @@ Avatar is NOT part of sign-up (upload later via `PUT /profile`).
 **Response `data`:** `{ "access_token": "" }` — user is logged in immediately after sign-up.
 
 **Behavior:**
+
 1. Validate input (see T2).
 2. Check email and username uniqueness (see T2).
 3. Hash password with bcrypt, insert user, generate JWT, return token.
@@ -125,6 +124,7 @@ Avatar is NOT part of sign-up (upload later via `PUT /profile`).
 Extends T1 — same endpoint.
 
 **Validation rules (in `SignUpInput.Validate()`):**
+
 - `email`: required, valid email, max 128
 - `password`: required, min 8, max 72 (bcrypt limit)
 - `username`: required, 3–32 chars, regex `^[a-z0-9_.]+$` (lowercase; lowercase the input before validating)
@@ -156,6 +156,7 @@ Then apply the Redis-backed rate-limit middleware (see 0.4) to `POST /auth/sign-
 **Response `data`:** `{ "access_token": "" }`
 
 **Behavior:**
+
 - Add `Login` to auth usecase (interface method already declared in `usecase/contracts.go`): fetch user by email, `bcrypt.CompareHashAndPassword`, issue JWT.
 - Wrong email OR wrong password → identical **401** response with message "invalid email or password" (never reveal which one is wrong; map both `entity.ErrNotFound` from repo and bcrypt mismatch to `entity.ErrInvalidCredentials`).
 - `is_active = false` users → same 401.
@@ -228,6 +229,7 @@ Create `internal/usecase/user` (interface `User` in contracts) and extend the us
 `POST /api/v1/post` — auth required. **Multipart form-data**: `image` (file, required), `caption` (string, optional, max 2048).
 
 **Behavior:**
+
 1. Enforce **max 10 MB** image size (reject before reading the whole body where possible), allowed types per 0.4.
 2. Save original to `storage/posts/<random-hex>.<ext>` (filename per 0.4); insert row into `posts` with `INSERT ... RETURNING id`.
 3. If DB insert fails after the file was written, delete the file (best-effort cleanup).
@@ -369,6 +371,7 @@ Create `internal/repo/persistent/follow` + `repo.Follow` (may already exist mini
 Uses the existing `notifications` table (`action_type` enum: `like|comment|follow`).
 
 **Creation (side effects added to T12/T15/T18 usecases):**
+
 - like → notify post owner (`actor_id`=liker, `post_id` set)
 - comment → notify post owner (`comment_id` + `post_id` set)
 - follow → notify followed user (`actor_id`=follower)
@@ -403,10 +406,12 @@ Extend user repo + `usecase/user`; route in `v1/user.go`.
 Uses existing `hashtags` + `post_hashtags` tables.
 
 **Parsing (extends T9 create-post usecase):**
+
 - Extract hashtags from caption with regex `#([\p{L}\p{N}_]+)` — lowercase them, dedupe, cap at first **30** tags, each max 64 chars (skip longer ones).
 - Upsert: `INSERT INTO hashtags(name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id`, then insert `post_hashtags` pairs (`ON CONFLICT DO NOTHING`). Same transaction as post creation.
 
 **Search endpoint:** `GET /api/v1/search/posts?tag=<name>` — public, paginated.
+
 - `tag`: required, leading `#` stripped if present, lowercased; empty → 400.
 - Posts joined through `post_hashtags`, `deleted_at IS NULL`, newest first.
 - Unknown tag → 200 with empty items.
@@ -427,15 +432,16 @@ Add cache-aside caching on top of the finished endpoints. Implement in the **use
 
 **What to cache (JSON-serialized DTOs):**
 
-| Data | Key | TTL |
-|---|---|---|
-| Single post base data (T14, WITHOUT `is_liked`) | `post:<post_id>` | 60s |
-| User profile base data (T7, WITHOUT `is_following`) | `user:profile:<user_id>` | 60s |
-| Feed page (T11, per user+page) | `feed:<user_id>:<page>:<per_page>` | 30s |
+| Data                                                 | Key                                  | TTL |
+| ---------------------------------------------------- | ------------------------------------ | --- |
+| Single post base data (T14, WITHOUT`is_liked`)     | `post:<post_id>`                   | 60s |
+| User profile base data (T7, WITHOUT`is_following`) | `user:profile:<user_id>`           | 60s |
+| Feed page (T11, per user+page)                       | `feed:<user_id>:<page>:<per_page>` | 30s |
 
 **Read path:** try Redis → hit: unmarshal, then compute `is_liked`/`is_following` from DB per-caller → miss or Redis error: query DB, `SET` with TTL (best-effort), return.
 
 **Invalidation (explicit `DEL`, best-effort, after the DB tx commits):**
+
 - like/unlike/comment/comment-delete on a post → `DEL post:<post_id>`
 - post delete → `DEL post:<post_id>` + `DEL user:profile:<owner_id>`
 - post create → `DEL user:profile:<owner_id>`

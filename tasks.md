@@ -80,7 +80,7 @@ Allowed additions (only when a task requires): `golang.org/x/image/draw` or `git
 ### 0.4 Global decisions (pre-answered questions — follow, do not ask)
 
 - **Auth**: single JWT access token (HS256), TTL 24h, secret from env `JWT_SECRET` (add to config + `.env.example`). Claims: `user_id`, `exp`, `iat`. No refresh tokens for MVP.
-- **Auth middleware**: gin middleware in `internal/controller/restapi/v1` that reads `Authorization: Bearer <token>`, validates via `pkg/jwt`, puts `user_id` (int64) into gin context. Missing/invalid → 401 envelope error. Applied per-route-group, not globally (`/sign-up`, `/login`, `GET /users/:user_id`, `GET /post/:post_id`, comments list are public; everything else requires auth). Public endpoints that return `is_following` / `is_liked` return `false` when unauthenticated (middleware variant that parses token if present but does not reject).
+- **Auth middleware**: gin middleware in `internal/controller/restapi/v1` that reads `Authorization: Bearer <token>`, validates via `pkg/jwt`, puts `user_id` (int64) into gin context. Missing/invalid → 401 envelope error. **The ONLY public API endpoints are `POST /auth/sign-up` and `POST /auth/login` — every other endpoint requires a valid token (401 otherwise).** No optional-auth middleware exists; `is_liked` / `is_following` are always computed for the authenticated caller. Non-API routes `/healthz` and the `GET /media/*` static file route stay public (infrastructure).
 - **IDs**: bigint ids everywhere — NO UUIDs anywhere in this project. Users are addressed by numeric `user_id` (`users.id`), posts by numeric `post_id` (`posts.id`), comments and notifications by their bigint ids. Every `:post_id` / `:user_id` / `:comment_id` path param is a bigint; non-numeric value → 400. Follow endpoints use `user_id` (not username, overriding the sheet).
 - **Image upload**: `multipart/form-data` for all image endpoints (NOT base64 JSON). File field name: `image` for posts, `avatar` for profile.
 - **Storage**: local disk via `pkg/storage`. Root dir from env `STORAGE_DIR` (default `./storage`). Layout: `storage/avatars/<name>.<ext>`, `storage/posts/<name>.<ext>`, `storage/thumbnails/<name>.jpg`, where `<name>` is a random unique filename generated in Go (e.g. 16 random bytes hex-encoded via `crypto/rand` — NOT a UUID). DB stores relative paths (e.g. `posts/ab12….jpg`). Serve files via gin static route `GET /media/*` → `STORAGE_DIR` (register in `restapi/router.go`, outside `/api/v1`). No S3 for MVP.
@@ -182,7 +182,7 @@ Reuse T3 middleware on `POST /auth/login`, same limits (5/min per email). Separa
 Two endpoints:
 
 1. `GET /api/v1/profile` — **auth required**, returns the caller's own profile (`user_id` from token).
-2. `GET /api/v1/users/:user_id` — public (optional-auth middleware), any user's profile.
+2. `GET /api/v1/users/:user_id` — **auth required**.
 
 **Response `data` (both):**
 
@@ -194,12 +194,12 @@ Two endpoints:
 ```
 
 - Counts via `COUNT(*)` subqueries in one SQL statement (posts filtered by `deleted_at IS NULL`).
-- `is_following`: whether the CALLER follows this user; `false` for own profile or unauthenticated callers.
-- Unknown/inactive `user_id` → 404. Non-numeric `user_id` → 400.
+- `is_following`: whether the CALLER follows this user; `false` for own profile callers.
+- inactive `user_id` → 404. Non-numeric `user_id` → 400.
 
 Also implement here (belongs to profile page):
 
-`GET /api/v1/users/:user_id/posts` — public, paginated (0.3), user's posts newest-first, excluding soft-deleted.
+`GET /api/v1/users/:user_id/posts` — auth required, paginated (0.3), user's posts newest-first, excluding soft-deleted.
 
 **Response `data`:** `{ "count": 0, "items": [ { "post_id": 0, "thumbnail_path": "", "caption": "", "created_at": "" } ] }`
 
@@ -293,7 +293,7 @@ In ONE transaction: delete like row + decrement `like_count`. If no like row exi
 
 ### T14. View a single post
 
-`GET /api/v1/post/:post_id` — public with optional auth (0.4).
+`GET /api/v1/post/:post_id` — auth required.
 
 **Response `data`:**
 
@@ -302,7 +302,7 @@ In ONE transaction: delete like row + decrement `like_count`. If no like row exi
   "likes_count": 0, "comments_count": 0, "created_at": "", "is_liked": false }
 ```
 
-- `is_liked` = caller has liked it (false when unauthenticated).
+- `is_liked` = caller has liked it.
 - Soft-deleted or unknown id → 404. Non-numeric `post_id` → 400 with field `post_id`.
 
 **Acceptance:** counts match reality; `is_liked` correct per caller; deleted post → 404.
@@ -312,7 +312,7 @@ In ONE transaction: delete like row + decrement `like_count`. If no like row exi
 Two endpoints:
 
 1. `POST /api/v1/post/:post_id/comments` — auth required. Body: `{ "content": "" }`, required, 1–2048 chars after trimming whitespace. In ONE transaction: insert comment + increment `posts.comment_count`. Missing/deleted post → 404. Response `data`: `null`.
-2. `GET /api/v1/post/:post_id/comments` — public, paginated (0.3), ordered `created_at ASC, id ASC` (oldest first — decision), excluding soft-deleted comments.
+2. `GET /api/v1/post/:post_id/comments` — auth required, paginated (0.3), ordered `created_at ASC, id ASC` (oldest first — decision), excluding soft-deleted comments.
 
 **List response `data`:** `{ "count": 0, "items": [ { "comment_id": 0, "post_id": 0, "user_id": 0, "username": "", "content": "", "created_at": "" } ] }` (include `comment_id` — needed for T16 even though LLD omits it).
 
@@ -390,7 +390,7 @@ Create `repo.Notification` + `internal/repo/persistent/notification`, `usecase/n
 
 ### T20. Search users
 
-`GET /api/v1/search/users?q=<term>` — auth optional (public), paginated (0.3).
+`GET /api/v1/search/users?q=<term>` — auth required, paginated (0.3).
 
 - `q`: required, 1–32 chars after trim; missing/empty → 400 field `q`.
 - Match: case-insensitive **substring** on username — `WHERE username ILIKE '%' || $1 || '%'`, escape `%`/`_` in user input. Order: exact match first, then prefix matches, then alphabetical (`ORDER BY (username = q) DESC, (username LIKE q || '%') DESC, username ASC`). Only `is_active = true`.
@@ -410,7 +410,7 @@ Uses existing `hashtags` + `post_hashtags` tables.
 - Extract hashtags from caption with regex `#([\p{L}\p{N}_]+)` — lowercase them, dedupe, cap at first **30** tags, each max 64 chars (skip longer ones).
 - Upsert: `INSERT INTO hashtags(name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id`, then insert `post_hashtags` pairs (`ON CONFLICT DO NOTHING`). Same transaction as post creation.
 
-**Search endpoint:** `GET /api/v1/search/posts?tag=<name>` — public, paginated.
+**Search endpoint:** `GET /api/v1/search/posts?tag=<name>` — auth required, paginated.
 
 - `tag`: required, leading `#` stripped if present, lowercased; empty → 400.
 - Posts joined through `post_hashtags`, `deleted_at IS NULL`, newest first.
@@ -458,5 +458,5 @@ Add cache-aside caching on top of the finished endpoints. Implement in the **use
 - `go build ./... && go vet ./... && go test ./...` clean.
 - `.env.example` contains every env var used (`HTTP_PORT`, `POSTGRES_URL`, `POSTGRES_POOL_MAX`, `LOG_LEVEL`, `JWT_SECRET`, `STORAGE_DIR`, `REDIS_URL`).
 - Redis outage does not break any endpoint (fail-open verified).
-- All routes registered in `v1/router.go` grouped by domain with correct middleware (auth / optional-auth / rate-limit).
+- All routes registered in `v1/router.go` grouped by domain with correct middleware (auth / rate-limit); only `/auth/sign-up` and `/auth/login` are reachable without a token.
 - Every list endpoint paginated per 0.3; every post read filters `deleted_at IS NULL`.

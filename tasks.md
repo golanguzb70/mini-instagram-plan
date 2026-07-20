@@ -26,9 +26,10 @@ mini-instagram/
 │   ├── usecase/
 │   │   ├── contracts.go                # usecase interfaces + Input structs with Validate()
 │   │   └── auth/auth.go                # implementations, one package per usecase group
-│   └── repo/
-│       ├── contracts.go                # repo interfaces
-│       └── persistent/user/user.go     # pgx implementations, one package per aggregate
+│   ├── repo/
+│   │   ├── contracts.go                # repo interfaces
+│   │   └── persistent/user/user.go     # pgx implementations, one package per aggregate
+│   └── worker/                         # (to create in T22) background workers, e.g. likesync
 └── pkg/                                # reusable, project-agnostic packages
     ├── httpserver/                     # gin server wrapper with options
     ├── postgres/                       # pgxpool wrapper with options
@@ -88,7 +89,7 @@ Allowed additions (only when a task requires): `golang.org/x/image/draw` or `git
 - **Redis**: used for rate limiting AND data cache. Create `pkg/redis` (go-redis v9 client wrapper, ping on startup), env `REDIS_URL` (add to config + `.env.example`, e.g. `redis://localhost:6379/0`). Wire in `internal/app/app.go`. **Fail-open policy**: if Redis is unavailable, log the error and continue — rate limiting allows the request, caching falls through to the DB. Redis errors must NEVER fail a user request.
 - **Rate limiting**: Redis-backed, keyed by email. Keys `rl:signup:<email>` / `rl:login:<email>`; algorithm: `INCR` + `EXPIRE 60s` on first hit; count > 5 → **429**. Implement as reusable gin middleware in `internal/controller/restapi/v1/middleware.go`. Limit: 5 requests per minute per email for `/sign-up` and `/login`.
 - **Passwords**: bcrypt, cost `bcrypt.DefaultCost`. Never log or return passwords.
-- **Errors**: sentinel errors in `internal/entity/errors.go` (`ErrNotFound` exists; add `ErrEmailTaken`, `ErrUsernameTaken`, `ErrInvalidCredentials`, `ErrForbidden`, `ErrAlreadyLiked`, `ErrNotLiked`, `ErrAlreadyFollowing`, `ErrNotFollowing`, `ErrSelfFollow` as needed). Usecases return these; handlers map them to HTTP codes with `errors.Is`.
+- **Errors**: sentinel errors in `internal/entity/errors.go` (`ErrNotFound` exists; add `ErrEmailTaken`, `ErrUsernameTaken`, `ErrInvalidCredentials`, `ErrForbidden`, `ErrNotLiked`, `ErrAlreadyFollowing`, `ErrNotFollowing`, `ErrSelfFollow` as needed). Usecases return these; handlers map them to HTTP codes with `errors.Is`.
 - **Migrations**: schema already exists in `migrations/20260716000001_create_instagram_tables.up.sql` (users, posts, likes, follows, comments, notifications, hashtags, post_hashtags). Do NOT recreate tables. If a task needs a schema change, add a NEW timestamped up/down migration pair.
 - **Testing**: unit tests for usecases with hand-written repo fakes (implement repo interfaces in `_test.go` files). No testcontainers/mocks libraries. Handlers verified via `httptest` where cheap. Run `go build ./... && go vet ./... && go test ./...` after every task.
 - **Logging**: use `pkg/logger`. Log errors at handler boundary; do not `panic`.
@@ -274,14 +275,14 @@ Posts authored by users the caller **follows** (NOT own posts — decision), `de
 In ONE transaction: insert into `likes` + increment `posts.like_count`.
 
 - Post missing or soft-deleted → 404.
-- Already liked (unique violation `23505` on `uq_likes_user_id_post_id`) → **409** message "post already liked" (and do NOT increment the counter — the tx rollback guarantees this).
+- Already liked → **idempotent success**: return 200 with `data: null`, do NOT insert and do NOT increment the counter. Implement via `INSERT ... ON CONFLICT (user_id, post_id) DO NOTHING` — if 0 rows inserted, skip the counter update and commit (no error to the client).
 - Liking own post is allowed.
 
 Create `internal/repo/persistent/like` (or fold into post repo — **decision: separate `repo.Like` interface, implemented in the post repo package is fine; keep interfaces separate**). Usecase: extend `usecase/post`.
 
 **Response `data`:** `null`.
 
-**Acceptance:** like increments `like_count` by exactly 1; double-like → 409 and counter unchanged.
+**Acceptance:** like increments `like_count` by exactly 1; repeating the same like any number of times → always 200 and counter stays unchanged.
 
 ### T13. Unlike a post
 
@@ -372,7 +373,7 @@ Uses the existing `notifications` table (`action_type` enum: `like|comment|follo
 
 **Creation (side effects added to T12/T15/T18 usecases):**
 
-- like → notify post owner (`actor_id`=liker, `post_id` set)
+- like → notify post owner (`actor_id`=liker, `post_id` set) — ONLY when a new like row was actually inserted (repeated idempotent likes from T12 must NOT create duplicate notifications)
 - comment → notify post owner (`comment_id` + `post_id` set)
 - follow → notify followed user (`actor_id`=follower)
 - **Never notify yourself** (liking/commenting your own post → no notification).
@@ -426,37 +427,80 @@ Create `repo.Hashtag` + `internal/repo/persistent/hashtag`; parsing lives in `us
 
 ## Epic 5 — Performance
 
-### T22. Redis caching layer
+### T22. Like/unlike cache (write buffer + cron flush)
 
-Add cache-aside caching on top of the finished endpoints. Implement in the **usecase layer** (inject the redis client / a small cache interface into usecases via `app.go`), not in handlers or repos.
+Caching scope is **likes only** — nothing else is cached. Like and unlike events are buffered in Redis instead of being written to Postgres directly; a background worker flushes them to the DB every **1 minute**. 
 
-**What to cache (JSON-serialized DTOs):**
+#### Cache structure
 
-| Data                                                 | Key                                  | TTL |
-| ---------------------------------------------------- | ------------------------------------ | --- |
-| Single post base data (T14, WITHOUT`is_liked`)     | `post:<post_id>`                   | 60s |
-| User profile base data (T7, WITHOUT`is_following`) | `user:profile:<user_id>`           | 60s |
-| Feed page (T11, per user+page)                       | `feed:<user_id>:<page>:<per_page>` | 30s |
+Two responsibilities:
 
-**Read path:** try Redis → hit: unmarshal, then compute `is_liked`/`is_following` from DB per-caller → miss or Redis error: query DB, `SET` with TTL (best-effort), return.
+**1. User like state** — pending like/unlike events per user until flushed.
 
-**Invalidation (explicit `DEL`, best-effort, after the DB tx commits):**
+- Key: `like:{user_id}:{post_id}`, type: Redis String
+- Value: `"1"` = liked, `"0"` = unliked
+- Written on every like/unlike event; read by the flush worker and the `is_liked` read path; deleted after a successful flush or when a pending action is cancelled.
+- No TTL.
 
-- like/unlike/comment/comment-delete on a post → `DEL post:<post_id>`
-- post delete → `DEL post:<post_id>` + `DEL user:profile:<owner_id>`
-- post create → `DEL user:profile:<owner_id>`
-- profile update (T8) → `DEL user:profile:<user_id>`
-- follow/unfollow → `DEL user:profile:<target_id>` and `DEL user:profile:<follower_id>` (counts changed)
-- feed keys: NOT explicitly invalidated — 30s TTL staleness is accepted (decision)
+**2. Like counter** — fast read path for the current count.
 
-**Acceptance:** second read of a post/profile within TTL does not hit Postgres (verify via logs or a repo call counter in tests); like immediately reflects in `likes_count` on next read (invalidation works); stopping Redis keeps all endpoints functional.
+- Key: `like-count:{post_id}`, type: Redis Hash, fields: `count` (int), `updated_at` (unix seconds, last change)
+- Updated on every like/unlike event; read whenever a post's `likes_count` is returned; deleted on post delete (add `DEL like-count:{post_id}` to T17).
 
----
+#### Handling like (replaces T12 DB tx)
 
-## Final checklist (after T22)
+Guard first (preserves T12 idempotency): resolve current `is_liked` via the read path below; if already `true` → return 200, change nothing. Otherwise:
 
-- `go build ./... && go vet ./... && go test ./...` clean.
-- `.env.example` contains every env var used (`HTTP_PORT`, `POSTGRES_URL`, `POSTGRES_POOL_MAX`, `LOG_LEVEL`, `JWT_SECRET`, `STORAGE_DIR`, `REDIS_URL`).
-- Redis outage does not break any endpoint (fail-open verified).
-- All routes registered in `v1/router.go` grouped by domain with correct middleware (auth / rate-limit); only `/auth/sign-up` and `/auth/login` are reachable without a token.
-- Every list endpoint paginated per 0.3; every post read filters `deleted_at IS NULL`.
+1. If `like:{user_id}:{post_id}` exists and equals `"0"` → `DEL` the key (cancel the pending unlike).
+2. Else → `SET like:{user_id}:{post_id} "1"`.
+3. `HINCRBY like-count:{post_id} count 1` (initialize from DB via the read path if the hash is missing).
+4. `HSET like-count:{post_id} updated_at <now unix>`.
+
+Post existence check (404 for missing/soft-deleted) stays before any of this.
+
+#### Handling unlike (replaces T13 DB tx)
+
+Guard: resolve `is_liked`; if `false` → **409** "post is not liked" (T13 behavior unchanged). Otherwise:
+
+1. If `like:{user_id}:{post_id}` exists and equals `"1"` → `DEL` the key (cancel the pending like).
+2. Else → `SET like:{user_id}:{post_id} "0"`.
+3. Decrement `count` by 1, but never below 0 (check current value first).
+4. `HSET like-count:{post_id} updated_at <now unix>`.
+
+#### Flush worker — every 1 minute
+
+Implement in `internal/worker/likesync` (new package), started as a goroutine with a `time.Ticker` from `app.go`, stopped gracefully on shutdown. The worker keeps `lastFlushAt` (unix seconds) in memory; `0` on first run so everything is flushed.
+
+**Step 1 — flush like states:** `SCAN` keys matching `like:*:*` (use SCAN, never KEYS). For each: parse `user_id`/`post_id`, read value:
+- `"1"` → `INSERT INTO likes (user_id, post_id) VALUES ($1, $2) ON CONFLICT DO NOTHING;`
+- `"0"` → `DELETE FROM likes WHERE user_id = $1 AND post_id = $2;`
+- On success `DEL` the processed key; on DB error keep the key (retried next run).
+
+**Step 2 — flush counters:** `SCAN` `like-count:*`; for each read `count` and `updated_at`; if `updated_at > lastFlushAt`:
+
+```sql
+UPDATE posts SET like_count = $1, updated_at = now() WHERE id = $2;
+```
+
+(column is `like_count` in the schema). Then set `lastFlushAt = now` (taken BEFORE the scan started).
+
+#### Read path
+
+**Like count** — every place a post's `likes_count` is returned (T11 feed, T14 single post, T21 hashtag search) must serve it from cache:
+
+1. `HGET like-count:{post_id} count` → hit: return it.
+2. Miss: `SELECT COUNT(*) FROM likes WHERE post_id = $1` (NOTE: from now on the `likes` table is the source of truth, not `posts.like_count`), then `HSET count=<dbCount> updated_at=0` and return it. For list endpoints batch this (pipeline `HGET`s, single grouped `COUNT` query for the misses).
+
+**is_liked** (T14):
+
+1. `GET like:{user_id}:{post_id}` → `"1"` = true, `"0"` = false.
+2. Miss: `SELECT id FROM likes WHERE user_id = $1 AND post_id = $2 LIMIT 1` → exists = true.
+
+#### Decisions
+
+- **Redis down** → fall back to the old direct-DB transactional path from T12/T13 for that request (fail-open, consistent with 0.4); read paths fall back to the DB queries above.
+- **Notifications (T19)**: the like notification is created at EVENT time (when the state transition to liked is accepted), not at flush time; the idempotency guard already prevents duplicates.
+- Layering: cache logic lives in the **usecase layer** (`usecase/post`) behind a small cache interface; the flush worker talks to `repo.Like`/`repo.Post` directly.
+
+**Acceptance:** like → `likes_count` reflects immediately on next read (from cache) while the `likes` row appears only after the next flush (≤1 min); like→unlike before a flush leaves no pending keys and no DB write; counter never goes below 0; killing Redis keeps like/unlike working via the DB fallback; worker retries failed flushes without losing events.
+

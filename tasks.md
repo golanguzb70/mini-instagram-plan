@@ -1,3 +1,4 @@
+it ddqwat gig
 
 # Mini Instagram — Implementation Tasks
 
@@ -429,7 +430,7 @@ Create `repo.Hashtag` + `internal/repo/persistent/hashtag`; parsing lives in `us
 
 ### T22. Like/unlike cache (write buffer + cron flush)
 
-Caching scope is **likes only** — nothing else is cached. Like and unlike events are buffered in Redis instead of being written to Postgres directly; a background worker flushes them to the DB every **1 minute**. 
+Caching scope is **likes only** — nothing else is cached. Like and unlike events are buffered in Redis instead of being written to Postgres directly; a background worker flushes them to the DB every **1 minute**.
 
 #### Cache structure
 
@@ -472,6 +473,7 @@ Guard: resolve `is_liked`; if `false` → **409** "post is not liked" (T13 behav
 Implement in `internal/worker/likesync` (new package), started as a goroutine with a `time.Ticker` from `app.go`, stopped gracefully on shutdown. The worker keeps `lastFlushAt` (unix seconds) in memory; `0` on first run so everything is flushed.
 
 **Step 1 — flush like states:** `SCAN` keys matching `like:*:*` (use SCAN, never KEYS). For each: parse `user_id`/`post_id`, read value:
+
 - `"1"` → `INSERT INTO likes (user_id, post_id) VALUES ($1, $2) ON CONFLICT DO NOTHING;`
 - `"0"` → `DELETE FROM likes WHERE user_id = $1 AND post_id = $2;`
 - On success `DEL` the processed key; on DB error keep the key (retried next run).
@@ -503,4 +505,3 @@ UPDATE posts SET like_count = $1, updated_at = now() WHERE id = $2;
 - Layering: cache logic lives in the **usecase layer** (`usecase/post`) behind a small cache interface; the flush worker talks to `repo.Like`/`repo.Post` directly.
 
 **Acceptance:** like → `likes_count` reflects immediately on next read (from cache) while the `likes` row appears only after the next flush (≤1 min); like→unlike before a flush leaves no pending keys and no DB write; counter never goes below 0; killing Redis keeps like/unlike working via the DB fallback; worker retries failed flushes without losing events.
-
